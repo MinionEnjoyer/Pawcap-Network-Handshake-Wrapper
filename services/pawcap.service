@@ -1,0 +1,24 @@
+[Unit]
+Description=Pawcap - Autonomous WiFi Auditor
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pawcap
+ExecStart=/usr/bin/python3 /opt/pawcap/pawcap_daemon.py
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=no
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pawcap
+
+[Install]
+WantedBy=multi-user.target

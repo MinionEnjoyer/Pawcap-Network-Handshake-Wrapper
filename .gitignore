@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.pcap
+*.pcapng
+*.cap
+*.22000
+*.code-workspace
+.claude/
+captures/
+data/

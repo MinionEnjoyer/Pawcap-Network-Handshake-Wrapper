@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Pawcap</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-controls">
+                <div class="toggle-controls">
+                    <div class="toggle-group">
+                        <label class="toggle-label">Scanner</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="scannerToggle" onchange="toggleScanner(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <label class="toggle-label">GPS</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="gpsToggle" onchange="toggleGPS(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <label class="toggle-label">Character</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="characterToggle" onchange="toggleCharacter(this.checked)" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <label class="toggle-label">Feed</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="feedToggle" onchange="toggleFeed(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <label class="toggle-label">Organic</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="organicToggle" checked onchange="toggleOrganic(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <label class="toggle-label">Social</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="socialToggle" onchange="toggleSocial(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <label class="toggle-label">Settings</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="settingsToggle" onchange="toggleSettings(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="character-row" id="characterRow">
+            <div class="name-panel">
+                <div class="device-name-display" id="deviceNameDisplay">PAWCAP</div>
+            </div>
+            <div class="character-panel mood-sleeping" id="characterPanel">
+                <div class="character-face" id="characterFace">U´-ᴥ-`U</div>
+                <div class="character-details">
+                    <div class="character-mood" id="characterMood">sleeping</div>
+                    <div class="character-message" id="characterMessage">Waiting to start...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-grid stats-grid-4">
+            <div class="stat-card">
+                <div class="stat-icon">BATT</div>
+                <div class="stat-value" id="battStatValue">--%</div>
+                <div class="stat-label" id="battStatLabel">Battery</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">TIME</div>
+                <div class="stat-value" id="uptime">00:00:00</div>
+                <div class="stat-label">Uptime</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">TEMP</div>
+                <div class="stat-value" id="tempStatValue">--C</div>
+                <div class="stat-label">CPU Temp</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">DRIVE</div>
+                <div class="stat-value" id="driveStatValue">--</div>
+                <div class="stat-label" id="driveStatLabel">Storage</div>
+            </div>
+        </div>
+
+        <div class="stats-grid stats-grid-4">
+            <div class="stat-card">
+                <div class="stat-icon">SCAN</div>
+                <div class="stat-value" id="networksScanned">0</div>
+                <div class="stat-label">Networks</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">TGT</div>
+                <div class="stat-value" id="candidateCount">0</div>
+                <div class="stat-label">Candidates</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">CAPT</div>
+                <div class="stat-value" id="handshakesCaptured">0</div>
+                <div class="stat-label">Handshakes</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">HIT</div>
+                <div class="stat-value" id="successRate">0%</div>
+                <div class="stat-label">Success Rate</div>
+            </div>
+        </div>
+
+        <div class="settings-section" id="settingsSection" style="display: none;">
+            <h3>Settings</h3>
+            <div class="device-name-setting">
+                <label for="deviceNameInput">Device Name</label>
+                <div class="device-name-row">
+                    <input type="text" id="deviceNameInput" maxlength="32" placeholder="Pawcap" spellcheck="false">
+                    <button onclick="updateDeviceName()">Save</button>
+                </div>
+            </div>
+            <div class="theme-selector" id="themeSelectorContainer"></div>
+            <div class="settings-grid">
+                <div class="setting-item">
+                    <label>Primary Color</label>
+                    <input type="color" id="settingPrimary" value="#ff0000" onchange="updateThemeColor('--primary', this.value)">
+                </div>
+                <div class="setting-item">
+                    <label>Background</label>
+                    <input type="color" id="settingBg" value="#1a1a1a" onchange="updateThemeColor('--bg-dark', this.value)">
+                </div>
+                <div class="setting-item">
+                    <label>Card Background</label>
+                    <input type="color" id="settingCard" value="#ffffff" onchange="updateThemeColor('--card-bg', this.value)">
+                </div>
+                <div class="setting-item">
+                    <label>Text Color</label>
+                    <input type="color" id="settingText" value="#000000" onchange="updateThemeColor('--text-dark', this.value)">
+                </div>
+                <div class="setting-item">
+                    <label>Accent Color</label>
+                    <input type="color" id="settingSuccess" value="#00cc00" onchange="updateThemeColor('--success', this.value)">
+                </div>
+            </div>
+            <div class="settings-actions">
+                <button onclick="resetTheme()">Reset to Default</button>
+                <button onclick="saveCustomTheme()">Save Custom Theme</button>
+            </div>
+        </div>
+
+        <div class="activity-section">
+            <div class="activity-card">
+                <h3>Scanner Activity</h3>
+                <div id="scannerActivity">
+                    <p><strong>Mode:</strong> <span id="mode">Scanning</span></p>
+                    <p><strong>Channel:</strong> <span id="channel">--</span></p>
+                    <p><strong>Candidates:</strong> <span id="candidatesInline">0</span></p>
+                    <p><strong>Last Update:</strong> <span id="lastUpdate">--</span></p>
+                    <div class="activity-divider"></div>
+                    <div class="interface-list" id="interfaceList">
+                        <p class="empty-state">No interfaces active...</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="activity-card">
+                <h3>Auth Activity</h3>
+                <div id="authActivity">
+                    <p><strong>Handshakes:</strong> <span id="authHandshakes">0</span></p>
+                    <p><strong>Success Rate:</strong> <span id="authSuccessRate">0%</span></p>
+                    <p><strong>Deauths Sent:</strong> <span id="authDeauths">0</span></p>
+                    <p><strong>Passive Captures:</strong> <span id="authPassive">0</span></p>
+                    <div class="activity-divider"></div>
+                    <p><strong>GPS Fix:</strong> <span id="gpsStatus">No Fix</span></p>
+                    <p><strong>Latitude:</strong> <span id="latitude">--</span></p>
+                    <p><strong>Longitude:</strong> <span id="longitude">--</span></p>
+                    <p><strong>Satellites:</strong> <span id="satellites">--</span></p>
+                    <div class="activity-divider"></div>
+                    <p><strong>Lifetime Captures:</strong> <span id="lifetimeHandshakes">--</span></p>
+                    <p><strong>Known Networks:</strong> <span id="knownNetworks">--</span></p>
+                    <p><strong>Blacklisted:</strong> <span id="repeatOffenders">--</span></p>
+                </div>
+            </div>
+        </div>
+
+        <div class="feed-section" id="feedSection" style="display: none;">
+            <h3>Activity Feed</h3>
+            <div class="feed-list" id="feedList">
+                <p class="empty-state">Feed inactive...</p>
+            </div>
+        </div>
+
+        <div class="handshakes-section">
+            <h3>Captured Handshakes</h3>
+            <div class="handshake-list" id="handshakeList">
+                <p class="empty-state">No handshakes captured yet...</p>
+            </div>
+        </div>
+
+        <div class="recent-section">
+            <h3>Recent Networks</h3>
+            <div class="capture-list" id="captureList">
+                <p class="empty-state">No networks detected yet...</p>
+            </div>
+        </div>
+
+        <div class="social-section" id="socialSection" style="display: none;">
+            <h3>Friends</h3>
+            <div class="social-list" id="socialList">
+                <p class="empty-state">No friends nearby yet...</p>
+            </div>
+        </div>
+
+        <div class="blacklist-section">
+            <h3>Blacklisted Networks</h3>
+            <div class="blacklist-list" id="blacklistList">
+                <p class="empty-state">No blacklisted networks...</p>
+            </div>
+            <button class="clear-blacklist-btn" id="clearBlacklistBtn" onclick="clearBlacklist()" style="display: none;">Clear Blacklist</button>
+        </div>
+
+        <div class="whitelist-section">
+            <h3>Protected Networks</h3>
+            <div class="whitelist" id="whitelist">
+                <!-- Whitelist badges are loaded dynamically from config/whitelist.conf -->
+            </div>
+        </div>
+
+        <footer>
+            <p>Pawcap V1.0 RELEASE</p>
+            <p><span id="userHost">user@pawcap</span> | <span id="userIP"></span></p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

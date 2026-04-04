@@ -1,0 +1,155 @@
+#!/bin/bash
+# Pawcap First-Time Setup
+# Run this ON the Pi (or pipe via SSH) to set up a fresh installation.
+#
+# Usage (on the Pi):
+#   sudo bash setup.sh
+#
+# Or from your dev machine after SCP'ing the whole project:
+#   scp -r pawcap/ pi@<PI_IP_ADDRESS>:/tmp/pawcap-src/
+#   ssh pi@<PI_IP_ADDRESS> "sudo bash /tmp/pawcap-src/setup.sh"
+
+set -e
+
+echo "=========================================="
+echo "  Pawcap - First-Time Setup"
+echo "=========================================="
+
+# Check root
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: Run as root (use sudo)"
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="/opt/pawcap"
+
+# --- Detect USB WiFi adapter ---
+echo ""
+echo "Detecting WiFi interfaces..."
+
+USB_ADAPTERS=()
+for iface in $(ls /sys/class/net | grep -E '^wl'); do
+    driver_path=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)
+    if echo "$driver_path" | grep -q "usb"; then
+        USB_ADAPTERS+=("$iface")
+        echo "  USB adapter: $iface"
+    else
+        echo "  Built-in:    $iface (will not be touched)"
+    fi
+done
+
+if [ ${#USB_ADAPTERS[@]} -lt 1 ]; then
+    echo ""
+    echo "Error: No USB WiFi adapters detected."
+    echo "Pawcap needs at least one USB WiFi adapter for scanning."
+    exit 1
+fi
+
+SCAN_IFACE="${USB_ADAPTERS[0]}"
+echo ""
+echo "Using $SCAN_IFACE for scanning."
+if [ ${#USB_ADAPTERS[@]} -gt 1 ]; then
+    echo "Second adapter ${USB_ADAPTERS[1]} available for dedicated capture."
+fi
+
+# --- Name your device ---
+echo ""
+echo "Every good dog needs a name."
+read -p "  Name your device [Pawcap]: " DEVICE_NAME
+DEVICE_NAME="${DEVICE_NAME:-Pawcap}"
+echo "  Welcome, $DEVICE_NAME!"
+
+# --- Install system dependencies ---
+echo ""
+echo "Installing system dependencies..."
+apt-get update -qq
+apt-get install -y -qq \
+    aircrack-ng \
+    python3 \
+    python3-pip \
+    python3-smbus \
+    wireless-tools \
+    net-tools \
+    sqlite3 \
+    network-manager
+
+# --- Install Python dependencies ---
+echo ""
+echo "Installing Python packages..."
+pip3 install --break-system-packages -q \
+    flask==3.0.0 \
+    flask-cors==4.0.0 \
+    pyserial==3.5
+
+# --- Create directory structure ---
+echo ""
+echo "Creating directories..."
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/config"
+mkdir -p "$INSTALL_DIR/web"
+mkdir -p "$INSTALL_DIR/captures/handshakes"
+mkdir -p "$INSTALL_DIR/data"
+
+# --- Copy application files ---
+echo ""
+echo "Installing application files..."
+
+for f in pawcap_daemon.py wifi_scanner.py web_server.py pawcap_db.py \
+         gps_logger.py battery_monitor.py; do
+    if [ -f "$SCRIPT_DIR/$f" ]; then
+        cp "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
+        echo "  $f"
+    fi
+done
+
+chmod +x "$INSTALL_DIR/pawcap_daemon.py"
+
+# --- Copy web files ---
+if [ -d "$SCRIPT_DIR/web" ]; then
+    cp "$SCRIPT_DIR/web/"* "$INSTALL_DIR/web/"
+    echo "  web/ (app.js, index.html, style.css)"
+fi
+
+# --- Copy config (only if not already present — preserve existing) ---
+if [ ! -f "$INSTALL_DIR/config/settings.json" ]; then
+    cp "$SCRIPT_DIR/config/settings.json" "$INSTALL_DIR/config/settings.json"
+    # Patch device name and detected interface into the config
+    sed -i "s/\"name\": \"Pawcap\"/\"name\": \"$DEVICE_NAME\"/" \
+        "$INSTALL_DIR/config/settings.json"
+    sed -i "s/\"interface\": \"wlan1\"/\"interface\": \"$SCAN_IFACE\"/" \
+        "$INSTALL_DIR/config/settings.json"
+    echo "  config/settings.json (new, name=$DEVICE_NAME, interface=$SCAN_IFACE)"
+else
+    echo "  config/settings.json (existing — preserved)"
+fi
+
+if [ -f "$SCRIPT_DIR/config/whitelist.conf" ]; then
+    cp "$SCRIPT_DIR/config/whitelist.conf" "$INSTALL_DIR/config/whitelist.conf"
+    echo "  config/whitelist.conf"
+fi
+
+# --- Install systemd service ---
+echo ""
+echo "Installing systemd service..."
+cp "$SCRIPT_DIR/services/pawcap.service" /etc/systemd/system/pawcap.service
+systemctl daemon-reload
+systemctl enable pawcap
+
+echo ""
+echo "=========================================="
+echo "  $DEVICE_NAME is ready!"
+echo "=========================================="
+echo ""
+echo "  Device name:  $DEVICE_NAME"
+echo "  Install dir:  $INSTALL_DIR"
+echo "  Scan adapter: $SCAN_IFACE"
+echo "  Web port:     8080"
+echo ""
+echo "  Start:   sudo systemctl start pawcap"
+echo "  Stop:    sudo systemctl stop pawcap"
+echo "  Status:  sudo systemctl status pawcap"
+echo "  Logs:    sudo journalctl -u pawcap -f"
+echo ""
+echo "  Web UI:  http://$(hostname -I | awk '{print $1}'):8080"
+echo ""
