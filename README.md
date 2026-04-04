@@ -2,6 +2,19 @@
 
 Autonomous WiFi handshake capture tool for Raspberry Pi. Scans nearby networks, captures WPA/WPA2 handshakes via PMKID, deauth, and passive methods, learns from failures!
 ![Screenshot](screenshot.png)
+
+## Legal Disclaimer
+
+Pawcap is intended for **authorized security testing and educational purposes only**. Capturing WiFi handshakes from networks you don't own or have explicit permission to test is illegal in most jurisdictions.
+
+**You are responsible for:**
+- Only targeting networks you own or have written authorization to test
+- Adding your own networks to the whitelist to prevent accidental capture
+- Complying with all applicable local, state, and federal laws
+- Understanding that deauthentication attacks disrupt legitimate network connections
+
+The authors assume no liability for misuse of this tool.
+
 ## Features U♥ᴥ♥U
 
 - **Fully featured, customizable web dashboard** -- Themes, device configuration, and key setting customization
