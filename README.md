@@ -1,7 +1,7 @@
 # Pawcap
 
 Autonomous WiFi handshake capture tool for Raspberry Pi. Scans nearby networks, captures WPA/WPA2 handshakes via PMKID, deauth, and passive methods, learns from failures!
-## Features
+## Features U♥ᴥ♥U
 
 - **Fully featured, customizable web dashboard** -- Themes, device configuration, and key setting customization
 - **Multi-strategy capture** -- PMKID, deauthentication + 4-way handshake, and passive listening
@@ -18,13 +18,13 @@ Autonomous WiFi handshake capture tool for Raspberry Pi. Scans nearby networks, 
 - **Organic mode** -- Randomized naturalistic behavior breaks between scan cycles
 - **Dog personality** -- Configurable device name, ASCII faces, moods, and activity messages
 
-## Requirements
+## Requirements U´◕ᴥ◕`U
 
 - Raspberry Pi 4 (2GB+ RAM)
 - USB WiFi adapter with monitor mode and packet injection support
 - Raspberry Pi OS Lite (64-bit)
 
-## Setup
+## Setup U⌒ᴥ⌒U
 
 See [DOCUMENTATION.md](DOCUMENTATION.md) for full installation instructions, configuration reference, API endpoints, and troubleshooting.
 
