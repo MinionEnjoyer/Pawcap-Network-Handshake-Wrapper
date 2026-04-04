@@ -2,10 +2,22 @@
 
 **Pawcap** is an autonomous WiFi auditing tool that runs on a Raspberry Pi. It scans for nearby networks, captures WPA/WPA2 handshakes using multiple attack strategies, and learns from its successes and failures over time. It has a real-time web UI, GPS tagging, battery monitoring, and a dog-themed personality system.
 
-The name is a parody of **pcap** (packet capture).
-
 **GitHub:** [github.com/MinionEnjoyer](https://github.com/MinionEnjoyer)
 **License:** MIT
+
+---
+
+## Legal Disclaimer
+
+Pawcap is intended for **authorized security testing and educational purposes only**. Capturing WiFi handshakes from networks you don't own or have explicit permission to test is illegal in most jurisdictions.
+
+**You are responsible for:**
+- Only targeting networks you own or have written authorization to test
+- Adding your own networks to the whitelist to prevent accidental capture
+- Complying with all applicable local, state, and federal laws
+- Understanding that deauthentication attacks disrupt legitimate network connections
+
+The authors assume no liability for misuse of this tool.
 
 ---
 
@@ -645,20 +657,6 @@ All endpoints return JSON. Base URL: `http://<PI_IP>:8080`
 | Method | Endpoint | Body | Description |
 |--------|----------|------|-------------|
 | POST | `/api/settings/name` | `{"name": "string"}` | Update device name (max 32 chars, persists to config) |
-
----
-
-## Legal Disclaimer
-
-Pawcap is intended for **authorized security testing and educational purposes only**. Capturing WiFi handshakes from networks you don't own or have explicit permission to test is illegal in most jurisdictions.
-
-**You are responsible for:**
-- Only targeting networks you own or have written authorization to test
-- Adding your own networks to the whitelist to prevent accidental capture
-- Complying with all applicable local, state, and federal laws
-- Understanding that deauthentication attacks disrupt legitimate network connections
-
-The authors assume no liability for misuse of this tool.
 
 ---
 
