@@ -42,7 +42,7 @@ The authors assume no liability for misuse of this tool.
 
 See [DOCUMENTATION.md](DOCUMENTATION.md) for full installation instructions, configuration reference, API endpoints, and troubleshooting.
 
-# Support
+## Support
 
 If you found this project useful, consider supporting me here: https://buymeacoffee.com/minionenjoyer
 Thank you!
