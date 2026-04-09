@@ -37,6 +37,23 @@ class WebServer:
         # Register routes
         self._register_routes()
     
+    def _safe_battery_read(self):
+        """Read battery status with a timeout to prevent I2C hangs"""
+        if not self.battery_monitor:
+            return {'available': False}
+        try:
+            result = [None]
+            def _read():
+                result[0] = self.battery_monitor.get_status()
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
+            t.join(timeout=2)
+            if result[0] is not None:
+                return result[0]
+        except:
+            pass
+        return {'available': False}
+
     def _get_capture_count(self):
         """Thread-safe method to get current capture count"""
         if not self.scanner:
@@ -95,10 +112,8 @@ class WebServer:
             # Calculate uptime in seconds
             uptime_seconds = int(time.time() - self.start_time)
             
-            # Get battery status
-            battery = {'available': False}
-            if self.battery_monitor:
-                battery = self.battery_monitor.get_status()
+            # Get battery status (with timeout to prevent I2C hangs)
+            battery = self._safe_battery_read()
             
             # Get CPU temperature
             cpu_temp = None
@@ -169,7 +184,10 @@ class WebServer:
                     'scan_phase': stats.get('scan_phase', ''),
                     'dual_mode': self.scanner.dual_mode if self.scanner else False,
                     'organic_mode': self.scanner.organic_mode if self.scanner and hasattr(self.scanner, 'organic_mode') else False,
-                    'social_mode': self.scanner.social_mode if self.scanner and hasattr(self.scanner, 'social_mode') else False
+                    'social_mode': self.scanner.social_mode if self.scanner and hasattr(self.scanner, 'social_mode') else False,
+                    'find_friends_mode': self.scanner.find_friends_mode if self.scanner and hasattr(self.scanner, 'find_friends_mode') else False,
+                    'pack_mode': self.scanner.pack_mode if self.scanner and hasattr(self.scanner, 'pack_mode') else False,
+                    'pack_peers': len(self.scanner._pack_peers) if self.scanner and hasattr(self.scanner, '_pack_peers') else 0
                 },
                 'device_name': self.config.get('device', {}).get('name', 'Pawcap'),
                 'mood': self.scanner.get_mood() if self.scanner and hasattr(self.scanner, 'get_mood') else {'state': 'sleeping', 'face': 'U´-ᴥ-`U', 'message': 'Offline'},
@@ -280,15 +298,42 @@ class WebServer:
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
+        @self.app.route('/api/control/find-friends', methods=['POST'])
+        def toggle_find_friends():
+            """Toggle find friends mode on/off"""
+            try:
+                data = request.get_json()
+                enabled = data.get('enabled', False)
+                if self.scanner:
+                    self.scanner.find_friends_mode = enabled
+                return jsonify({'status': 'success', 'message': f'Find friends {"enabled" if enabled else "disabled"}'}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        @self.app.route('/api/control/pack-mode', methods=['POST'])
+        def toggle_pack_mode():
+            """Toggle pack mode on/off"""
+            try:
+                data = request.get_json()
+                enabled = data.get('enabled', False)
+                if self.scanner:
+                    self.scanner.pack_mode = enabled
+                return jsonify({'status': 'success', 'message': f'Pack mode {"enabled" if enabled else "disabled"}'}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
         @self.app.route('/api/social/friends')
         def get_friends():
             """Get social encounters (friends list)"""
             if self.scanner and hasattr(self.scanner, 'social_encounters'):
                 friends = []
+                pack_peers = dict(self.scanner._pack_peers) if hasattr(self.scanner, '_pack_peers') else {}
                 for peer_id, data in self._get_social_encounters_snapshot():
+                    name = data['name']
+                    in_pack = name in pack_peers and self.scanner._pack_mode
                     friends.append({
                         'peer_id': peer_id,
-                        'name': data['name'],
+                        'name': name,
                         'type': data['type'],
                         'face': data['face'],
                         'signal': data['signal'],
@@ -297,6 +342,7 @@ class WebServer:
                         'last_seen': data['last_seen'],
                         'version': data.get('version', '?'),
                         'pwnd_tot': data.get('pwnd_tot', 0),
+                        'in_pack': in_pack,
                     })
                 friends.sort(key=lambda f: f.get('last_seen', 0) if isinstance(f.get('last_seen', 0), (int, float)) else 0, reverse=True)
                 return jsonify(friends)
@@ -373,6 +419,75 @@ class WebServer:
                         json.dump(disk_config, f, indent=2)
 
                 return jsonify({'status': 'success', 'name': new_name}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        @self.app.route('/api/whitelist')
+        def get_whitelist():
+            """Get protected network SSIDs"""
+            if self.scanner and hasattr(self.scanner, 'whitelist'):
+                return jsonify(sorted(self.scanner.whitelist))
+            return jsonify([])
+
+        @self.app.route('/api/whitelist', methods=['POST'])
+        def add_whitelist():
+            """Add an SSID to the whitelist"""
+            try:
+                data = request.get_json()
+                ssid = (data.get('ssid') or '').strip()
+                if not ssid:
+                    return jsonify({'status': 'error', 'message': 'SSID cannot be empty'}), 400
+
+                whitelist_file = self.config.get('whitelist', {}).get('file', '/opt/pawcap/config/whitelist.conf')
+
+                # Add to scanner's in-memory set
+                if self.scanner and hasattr(self.scanner, 'whitelist'):
+                    self.scanner.whitelist.add(ssid)
+
+                # Persist to file (read existing, append if not present)
+                import os
+                existing = set()
+                if os.path.exists(whitelist_file):
+                    with open(whitelist_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#'):
+                                existing.add(line)
+                if ssid not in existing:
+                    with open(whitelist_file, 'a') as f:
+                        f.write(ssid + '\n')
+
+                return jsonify({'status': 'success', 'ssid': ssid}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        @self.app.route('/api/whitelist', methods=['DELETE'])
+        def remove_whitelist():
+            """Remove an SSID from the whitelist"""
+            try:
+                data = request.get_json()
+                ssid = (data.get('ssid') or '').strip()
+                if not ssid:
+                    return jsonify({'status': 'error', 'message': 'SSID cannot be empty'}), 400
+
+                whitelist_file = self.config.get('whitelist', {}).get('file', '/opt/pawcap/config/whitelist.conf')
+
+                # Remove from scanner's in-memory set
+                if self.scanner and hasattr(self.scanner, 'whitelist'):
+                    self.scanner.whitelist.discard(ssid)
+
+                # Rewrite file without the removed SSID
+                import os
+                if os.path.exists(whitelist_file):
+                    with open(whitelist_file, 'r') as f:
+                        lines = f.readlines()
+                    with open(whitelist_file, 'w') as f:
+                        for line in lines:
+                            stripped = line.strip()
+                            if stripped.startswith('#') or stripped != ssid:
+                                f.write(line)
+
+                return jsonify({'status': 'success', 'ssid': ssid}), 200
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
