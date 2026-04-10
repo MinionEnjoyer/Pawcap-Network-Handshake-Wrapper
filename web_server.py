@@ -615,18 +615,22 @@ class WebServer:
     def stop(self):
         """Stop the web server"""
         self.running = False
-        # Note: Flask doesn't have a clean shutdown in threaded mode
-        # The daemon thread will terminate when the main program exits
     
     def _run_server(self, port):
-        """Run the Flask server"""
+        """Run the Flask server in single-threaded mode.
+        
+        Flask's threaded=True creates an unbounded OS thread per request
+        which exhausts the Pi Zero's 587-thread ulimit within minutes of
+        UI polling.  Single-threaded mode handles one request at a time
+        which is fine for a single-user LAN dashboard.
+        """
         try:
             self.app.run(
                 host='0.0.0.0',
                 port=port,
                 debug=False,
                 use_reloader=False,
-                threaded=True
+                threaded=False
             )
         except Exception as e:
             print(f"Web server error: {e}")
