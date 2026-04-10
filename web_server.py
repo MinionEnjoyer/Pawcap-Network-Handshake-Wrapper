@@ -11,6 +11,8 @@ import time
 import socket
 import getpass
 import shutil
+import os
+import json
 
 try:
     from battery_monitor import get_battery_monitor
@@ -168,7 +170,7 @@ class WebServer:
                     'wps_captures': stats.get('wps_captures', 0)
                 },
                 'gps': {
-                    'enabled': True,
+                    'enabled': self.gps.running if self.gps else False,
                     'latitude': gps_data.get('latitude'),
                     'longitude': gps_data.get('longitude'),
                     'altitude': gps_data.get('altitude'),
@@ -258,7 +260,7 @@ class WebServer:
         
         @self.app.route('/api/control/gps', methods=['POST'])
         def control_gps():
-            """Toggle GPS on/off"""
+            """Toggle GPS on/off and persist setting"""
             try:
                 data = request.get_json()
                 enabled = data.get('enabled', False)
@@ -268,6 +270,17 @@ class WebServer:
                         self.gps.start()
                     else:
                         self.gps.stop()
+                    
+                    # Persist to settings.json so it survives reboot
+                    self.config.setdefault('gps', {})['auto_start'] = enabled
+                    config_path = '/opt/pawcap/config/settings.json'
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r') as f:
+                            disk_config = json.load(f)
+                        disk_config.setdefault('gps', {})['auto_start'] = enabled
+                        with open(config_path, 'w') as f:
+                            json.dump(disk_config, f, indent=2)
+                    
                     return jsonify({'status': 'success', 'message': f'GPS {"enabled" if enabled else "disabled"}'}), 200
                 else:
                     return jsonify({'status': 'error', 'message': 'GPS not available'}), 500
@@ -397,7 +410,6 @@ class WebServer:
         def update_device_name():
             """Update the device name and persist to config"""
             try:
-                import json, os
                 data = request.get_json()
                 new_name = (data.get('name') or '').strip()
                 if not new_name:
