@@ -14,12 +14,13 @@ Autonomous WiFi handshake capture tool for Raspberry Pi. Scans nearby networks, 
 - **Whitelist protection** -- Your own networks are never targeted
 - **Blacklist with retrace** -- Failed networks are deprioritized, then retried on alternate bands
 - **Social mode** -- Discovers nearby Pawcap and Pwnagotchi devices via beacon frames
+- **Pack mode** -- Works in tandem with other Pawcap devices from your friends list to scan for and share handshakes.
 - **Organic mode** -- Randomized naturalistic behavior breaks between scan cycles
 - **Dog personality** -- Configurable device name, ASCII faces, moods, and activity messages
 
 ## Requirements
 
-- Raspberry Pi 4 (2GB+ RAM)
+- Raspberry Pi 4 (2GB+ RAM) or Raspberry Pi 02W
 - USB WiFi adapter with monitor mode and packet injection support
 - Raspberry Pi OS Lite (64-bit)
 
