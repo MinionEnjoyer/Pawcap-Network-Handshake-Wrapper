@@ -1028,7 +1028,13 @@ async function addWhitelist() {
 }
 
 async function removeWhitelist(ssid) {
-    if (!confirm(`Remove "${ssid}" from protected networks?`)) return;
+    // Remove immediately from the DOM for instant feedback
+    const container = document.getElementById('whitelist');
+    if (container) {
+        container.querySelectorAll('.badge').forEach(el => {
+            if (el.textContent.replace('×', '').trim() === ssid) el.remove();
+        });
+    }
 
     try {
         const response = await fetch(`${API_BASE}/api/whitelist`, {
@@ -1036,11 +1042,12 @@ async function removeWhitelist(ssid) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ssid })
         });
-        if (response.ok) {
-            updateWhitelist();
+        if (!response.ok) {
+            updateWhitelist(); // Revert visual on failure
         }
     } catch (error) {
         console.error('Failed to remove whitelist entry:', error);
+        updateWhitelist(); // Revert visual on error
     }
 }
 
