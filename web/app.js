@@ -8,6 +8,7 @@ let serverUptime = 0; // Server uptime in seconds from API
 let handshakeUpdateCounter = 0;
 let scannerSynced = false; // Prevent toggle desync on page load
 let pendingToggles = {};   // Track in-flight toggle API calls to prevent polling overwrite
+let statusPollBusy = false; // Prevent overlapping status polls
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', () => {
@@ -49,24 +50,27 @@ async function updateFooter(ip) {
 
 // Start automatic updates
 function startAutoUpdate() {
-    updateInterval = setInterval(() => {
+    updateInterval = setInterval(async () => {
         updateStatus();
         updateUptime();
         handshakeUpdateCounter++;
-        if (handshakeUpdateCounter >= 10) {
+        if (handshakeUpdateCounter >= 5) {
             handshakeUpdateCounter = 0;
-            updateHandshakes();
-            updateBlacklist();
-            updateWhitelist();
+            // Serialize slow-poll fetches to avoid concurrent request pileup
+            await updateHandshakes();
+            await updateBlacklist();
+            await updateWhitelist();
             if (document.getElementById('socialToggle').checked) {
-                updateFriends();
+                await updateFriends();
             }
         }
-    }, 1000); // Update every second
+    }, 2000); // Update every 2 seconds
 }
 
 // Update system status
 async function updateStatus() {
+    if (statusPollBusy) return; // Previous poll still in-flight — skip to prevent thread pileup
+    statusPollBusy = true;
     try {
         const response = await fetch(`${API_BASE}/api/status`);
         if (!response.ok) throw new Error('API not responding');
@@ -184,6 +188,8 @@ async function updateStatus() {
         
     } catch (error) {
         console.error('Failed to update status:', error);
+    } finally {
+        statusPollBusy = false;
     }
 }
 

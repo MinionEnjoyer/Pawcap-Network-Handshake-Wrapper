@@ -619,10 +619,10 @@ class WebServer:
     def _run_server(self, port):
         """Run the Flask server in single-threaded mode.
         
-        Flask's threaded=True creates an unbounded OS thread per request
-        which exhausts the Pi Zero's 587-thread ulimit within minutes of
-        UI polling.  Single-threaded mode handles one request at a time
-        which is fine for a single-user LAN dashboard.
+        threaded=True leaks OS threads on the Pi Zero (416MB RAM, 587
+        thread ulimit) because Werkzeug never joins finished request
+        threads.  Single-threaded mode prevents this.  Pack sync timeouts
+        are handled by increasing the comms worker's HTTP timeout.
         """
         try:
             self.app.run(
