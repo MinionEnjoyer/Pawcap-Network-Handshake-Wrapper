@@ -7,6 +7,7 @@ let feedEnabled = false;
 let serverUptime = 0; // Server uptime in seconds from API
 let handshakeUpdateCounter = 0;
 let scannerSynced = false; // Prevent toggle desync on page load
+let pendingToggles = {};   // Track in-flight toggle API calls to prevent polling overwrite
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', () => {
@@ -136,20 +137,20 @@ async function updateStatus() {
             document.getElementById('organicToggle').checked = data.activity.organic_mode;
         }
         
-        // Sync social mode toggle
-        if (data.activity.social_mode !== undefined) {
+        // Sync social mode toggle (skip if toggle API call is in flight)
+        if (data.activity.social_mode !== undefined && !pendingToggles.social) {
             const socialToggle = document.getElementById('socialToggle');
             socialToggle.checked = data.activity.social_mode;
             document.getElementById('socialSection').style.display = data.activity.social_mode ? 'block' : 'none';
         }
         
-        // Sync find friends toggle
-        if (data.activity.find_friends_mode !== undefined) {
+        // Sync find friends toggle (skip if toggle API call is in flight)
+        if (data.activity.find_friends_mode !== undefined && !pendingToggles.findFriends) {
             document.getElementById('findFriendsToggle').checked = data.activity.find_friends_mode;
         }
         
-        // Sync pack mode toggle
-        if (data.activity.pack_mode !== undefined) {
+        // Sync pack mode toggle (skip if toggle API call is in flight)
+        if (data.activity.pack_mode !== undefined && !pendingToggles.packMode) {
             document.getElementById('packModeToggle').checked = data.activity.pack_mode;
         }
         
@@ -459,11 +460,15 @@ async function toggleGPS(enabled) {
 
 async function toggleOrganic(enabled) {
     try {
-        await fetch(`${API_BASE}/api/control/organic`, {
+        const response = await fetch(`${API_BASE}/api/control/organic`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled })
         });
+        if (!response.ok) {
+            console.error('Failed to toggle organic mode:', response.status);
+            document.getElementById('organicToggle').checked = !enabled;
+        }
     } catch (error) {
         console.error('Failed to toggle organic mode:', error);
         document.getElementById('organicToggle').checked = !enabled;
@@ -472,18 +477,28 @@ async function toggleOrganic(enabled) {
 
 async function toggleSocial(enabled) {
     const section = document.getElementById('socialSection');
+    const toggle = document.getElementById('socialToggle');
     section.style.display = enabled ? 'block' : 'none';
+    pendingToggles.social = true;
     try {
-        await fetch(`${API_BASE}/api/control/social`, {
+        const response = await fetch(`${API_BASE}/api/control/social`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled })
         });
-        if (enabled) updateFriends();
+        if (response.ok) {
+            if (enabled) updateFriends();
+        } else {
+            console.error('Failed to toggle social mode:', response.status);
+            toggle.checked = !enabled;
+            section.style.display = enabled ? 'none' : 'block';
+        }
     } catch (error) {
         console.error('Failed to toggle social mode:', error);
-        document.getElementById('socialToggle').checked = !enabled;
-        section.style.display = !enabled ? 'block' : 'none';
+        toggle.checked = !enabled;
+        section.style.display = enabled ? 'none' : 'block';
+    } finally {
+        pendingToggles.social = false;
     }
 }
 
@@ -532,34 +547,55 @@ async function updateFriends() {
 
 // Find Friends toggle
 async function toggleFindFriends(enabled) {
+    const toggle = document.getElementById('findFriendsToggle');
+    pendingToggles.findFriends = true;
     try {
-        await fetch(`${API_BASE}/api/control/find-friends`, {
+        const response = await fetch(`${API_BASE}/api/control/find-friends`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled })
         });
+        if (!response.ok) {
+            console.error('Failed to toggle find friends:', response.status);
+            toggle.checked = !enabled;
+        }
     } catch (error) {
         console.error('Failed to toggle find friends:', error);
-        document.getElementById('findFriendsToggle').checked = !enabled;
+        toggle.checked = !enabled;
+    } finally {
+        pendingToggles.findFriends = false;
     }
 }
 
 // Pack Mode toggle
 async function togglePackMode(enabled) {
+    const toggle = document.getElementById('packModeToggle');
+    pendingToggles.packMode = true;
     try {
         // Auto-enable social if turning on pack mode
         if (enabled && !document.getElementById('socialToggle').checked) {
             document.getElementById('socialToggle').checked = true;
             await toggleSocial(true);
+            // If social failed to enable, abort pack mode
+            if (!document.getElementById('socialToggle').checked) {
+                toggle.checked = false;
+                return;
+            }
         }
-        await fetch(`${API_BASE}/api/control/pack-mode`, {
+        const response = await fetch(`${API_BASE}/api/control/pack-mode`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled })
         });
+        if (!response.ok) {
+            console.error('Failed to toggle pack mode:', response.status);
+            toggle.checked = !enabled;
+        }
     } catch (error) {
         console.error('Failed to toggle pack mode:', error);
-        document.getElementById('packModeToggle').checked = !enabled;
+        toggle.checked = !enabled;
+    } finally {
+        pendingToggles.packMode = false;
     }
 }
 

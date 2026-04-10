@@ -294,7 +294,8 @@ class WebServer:
                 enabled = data.get('enabled', False)
                 if self.scanner:
                     self.scanner.social_mode = enabled
-                return jsonify({'status': 'success', 'message': f'Social mode {"enabled" if enabled else "disabled"}'}), 200
+                actual = self.scanner.social_mode if self.scanner else enabled
+                return jsonify({'status': 'success', 'enabled': actual}), 200
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -306,7 +307,8 @@ class WebServer:
                 enabled = data.get('enabled', False)
                 if self.scanner:
                     self.scanner.find_friends_mode = enabled
-                return jsonify({'status': 'success', 'message': f'Find friends {"enabled" if enabled else "disabled"}'}), 200
+                actual = self.scanner.find_friends_mode if self.scanner else enabled
+                return jsonify({'status': 'success', 'enabled': actual}), 200
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -318,7 +320,8 @@ class WebServer:
                 enabled = data.get('enabled', False)
                 if self.scanner:
                     self.scanner.pack_mode = enabled
-                return jsonify({'status': 'success', 'message': f'Pack mode {"enabled" if enabled else "disabled"}'}), 200
+                actual = self.scanner.pack_mode if self.scanner else enabled
+                return jsonify({'status': 'success', 'enabled': actual}), 200
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -497,7 +500,95 @@ class WebServer:
             if self.scanner and hasattr(self.scanner, 'get_activity_feed'):
                 return jsonify(self.scanner.get_activity_feed())
             return jsonify([])
-    
+
+        # --- Pack tunnel API endpoints ---
+
+        @self.app.route('/api/pack/sync', methods=['POST'])
+        def pack_sync():
+            """Bidirectional pack state exchange. Peer POSTs its state, receives ours."""
+            if not self.scanner or not getattr(self.scanner, '_pack_mode', False):
+                return jsonify({'error': 'Pack mode not active'}), 403
+            try:
+                data = request.get_json()
+                peer_name = data.get('device_name', 'Unknown')
+                # Update peer data from the incoming sync
+                if hasattr(self.scanner, '_pack_peers') and peer_name in self.scanner._pack_peers:
+                    self.scanner._pack_peers[peer_name]['scan_state'] = data.get('scan_state', {})
+                    self.scanner._pack_peers[peer_name]['handshake_bssids'] = data.get('handshake_bssids', [])
+                    self.scanner._pack_peers[peer_name]['deauth_claims'] = data.get('deauth_claims', {})
+                    self.scanner._pack_peers[peer_name]['http_reachable'] = True
+                    self.scanner._pack_peers[peer_name]['last_seen'] = time.time()
+                # Return our state
+                our_state = {
+                    'device_name': self.config.get('device', {}).get('name', 'Pawcap'),
+                    'scan_state': self.scanner._get_pack_scan_state() if hasattr(self.scanner, '_get_pack_scan_state') else {},
+                    'handshake_bssids': self.scanner._get_handshake_bssids() if hasattr(self.scanner, '_get_handshake_bssids') else [],
+                    'deauth_claims': self.scanner._get_deauth_claims() if hasattr(self.scanner, '_get_deauth_claims') else {}
+                }
+                return jsonify(our_state), 200
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/pack/handshake', methods=['POST'])
+        def pack_receive_handshake():
+            """Receive a handshake capture file from a pack peer."""
+            if not self.scanner or not getattr(self.scanner, '_pack_mode', False):
+                return jsonify({'error': 'Pack mode not active'}), 403
+            try:
+                import os, json as json_mod
+                # Parse multipart: metadata field + capture file
+                metadata_raw = request.form.get('metadata')
+                if not metadata_raw:
+                    return jsonify({'error': 'Missing metadata'}), 400
+                metadata = json_mod.loads(metadata_raw)
+                bssid = metadata.get('bssid')
+                ssid = metadata.get('ssid', 'Unknown')
+                channel = metadata.get('channel')
+                if not bssid:
+                    return jsonify({'error': 'Missing BSSID'}), 400
+
+                # Skip if we already have this handshake
+                if self.db and self.db.has_handshake(bssid):
+                    return jsonify({'status': 'duplicate', 'message': f'Already have handshake for {bssid}'}), 200
+
+                capture = request.files.get('capture')
+                if not capture:
+                    return jsonify({'error': 'Missing capture file'}), 400
+
+                # Save to handshake_dir with PACK_ prefix
+                handshake_dir = self.config.get('capture', {}).get('handshake_dir', '/opt/pawcap/captures/handshakes')
+                os.makedirs(handshake_dir, exist_ok=True)
+                safe_ssid = "".join(c for c in ssid if c.isalnum() or c in ('-', '_'))
+                safe_bssid = bssid.replace(':', '')
+                from datetime import datetime
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                dest_file = os.path.join(handshake_dir, f'PACK_{safe_ssid}_{safe_bssid}_{timestamp}.cap')
+                capture.save(dest_file)
+
+                # Register in database
+                if self.db:
+                    self.db.add_handshake(bssid, ssid, dest_file, channel=channel)
+                    if self.scanner:
+                        self.scanner.stats['handshakes'] = self.scanner.stats.get('handshakes', 0) + 1
+                        self.scanner._log_activity('SUCCESS', f'Pack: received handshake for {ssid} ({bssid}) from peer')
+
+                return jsonify({'status': 'saved', 'file': os.path.basename(dest_file)}), 200
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/pack/handshakes')
+        def pack_list_handshakes():
+            """Return list of BSSIDs we have handshakes for (lightweight, for diffing)."""
+            if not self.scanner or not getattr(self.scanner, '_pack_mode', False):
+                return jsonify({'error': 'Pack mode not active'}), 403
+            bssids = []
+            if self.db:
+                try:
+                    bssids = [h['bssid'] for h in self.db.get_all_handshakes()]
+                except:
+                    pass
+            return jsonify({'bssids': bssids}), 200
+
     def start(self):
         """Start the web server"""
         if self.running:
