@@ -25,10 +25,25 @@ class X728BatteryMonitor:
         
         try:
             self.bus = smbus.SMBus(self.i2c_bus)
+            # Probe the device with a timeout to avoid hanging on missing hardware.
+            # smbus reads can block indefinitely if the I2C device isn't present.
+            probe_ok = [False]
+            def _probe():
+                try:
+                    self.bus.read_word_data(self.i2c_address, 0x02)
+                    probe_ok[0] = True
+                except:
+                    pass
+            t = threading.Thread(target=_probe, daemon=True)
+            t.start()
+            t.join(timeout=3)
+            if not probe_ok[0]:
+                raise RuntimeError("X728 not detected at I2C address 0x36 (probe timed out or failed)")
             self.enabled = True
-            print("✓ X728 Battery monitor initialized")
+            print("X728 Battery monitor initialized")
         except Exception as e:
-            print(f"⚠ X728 Battery monitor unavailable: {e}")
+            self.bus = None
+            print(f"X728 Battery monitor unavailable: {e}")
             print("  (Running without UPS monitoring)")
     
     def read_voltage(self) -> Optional[float]:
@@ -149,7 +164,7 @@ class BatteryMonitorThread(threading.Thread):
     def run(self):
         """Monitor battery in background"""
         self.running = True
-        print(f"🔋 Battery monitoring started (update every {self.update_interval}s)")
+        print(f"Battery monitoring started (update every {self.update_interval}s)")
         
         while self.running:
             try:
@@ -161,9 +176,9 @@ class BatteryMonitorThread(threading.Thread):
                     # Alert on low battery
                     if capacity is not None:
                         if capacity <= 10 and (self.last_capacity is None or self.last_capacity > 10):
-                            print(f"⚠️  CRITICAL BATTERY: {capacity}% remaining!")
+                            print(f"CRITICAL BATTERY: {capacity}% remaining!")
                         elif capacity <= 20 and (self.last_capacity is None or self.last_capacity > 20):
-                            print(f"⚠️  Low battery: {capacity}% remaining")
+                            print(f"Low battery: {capacity}% remaining")
                         
                         self.last_capacity = capacity
                 

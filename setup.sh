@@ -28,12 +28,66 @@ INSTALL_DIR="/opt/pawcap"
 echo ""
 echo "Detecting WiFi interfaces..."
 
+# Helper: get supported bands for an interface
+get_adapter_bands() {
+    local iface="$1"
+    local phy
+    phy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null || echo "")
+    if [ -z "$phy" ]; then
+        echo "unknown"
+        return
+    fi
+    local has_24=false
+    local has_5=false
+    while IFS= read -r line; do
+        if echo "$line" | grep -qE '^\s+\* 2[0-9]{3}\.' ; then
+            has_24=true
+        fi
+        if echo "$line" | grep -qE '^\s+\* 5[0-9]{3}\.' ; then
+            has_5=true
+        fi
+    done < <(iw phy "$phy" info 2>/dev/null)
+    if $has_24 && $has_5; then
+        echo "dual-band (2.4GHz + 5GHz)"
+    elif $has_5; then
+        echo "5GHz only"
+    elif $has_24; then
+        echo "2.4GHz only"
+    else
+        echo "unknown"
+    fi
+}
+
+# Helper: get chipset/driver for an interface
+get_adapter_chipset() {
+    local iface="$1"
+    local device_path
+    device_path=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || echo "")
+    if [ -z "$device_path" ]; then
+        echo "unknown"
+        return
+    fi
+    # Try USB product name first
+    local product
+    product=$(cat "$device_path/../product" 2>/dev/null || echo "")
+    if [ -n "$product" ]; then
+        echo "$product"
+        return
+    fi
+    # Fall back to driver name
+    local driver
+    driver=$(basename "$(readlink -f "$device_path/driver" 2>/dev/null)" 2>/dev/null || echo "unknown")
+    echo "$driver"
+}
+
 USB_ADAPTERS=()
 for iface in $(ls /sys/class/net | grep -E '^wl'); do
     driver_path=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)
     if echo "$driver_path" | grep -q "usb"; then
         USB_ADAPTERS+=("$iface")
-        echo "  USB adapter: $iface"
+        bands=$(get_adapter_bands "$iface")
+        chipset=$(get_adapter_chipset "$iface")
+        echo "  USB adapter: $iface ($chipset, $bands)"
     else
         echo "  Built-in:    $iface (will not be touched)"
     fi
@@ -56,8 +110,14 @@ fi
 # --- Name your device ---
 echo ""
 echo "Every good dog needs a name."
-read -p "  Name your device [Pawcap]: " DEVICE_NAME
-DEVICE_NAME="${DEVICE_NAME:-Pawcap}"
+# Support non-interactive mode: use PAWCAP_NAME env var or hostname as fallback
+if [ -t 0 ]; then
+    read -p "  Name your device [Pawcap]: " DEVICE_NAME
+    DEVICE_NAME="${DEVICE_NAME:-Pawcap}"
+else
+    DEVICE_NAME="${PAWCAP_NAME:-$(hostname)}"
+    echo "  Non-interactive mode: using name '$DEVICE_NAME'"
+fi
 echo "  Welcome, $DEVICE_NAME!"
 
 # --- Install system dependencies ---
@@ -66,9 +126,12 @@ echo "Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq \
     aircrack-ng \
+    hcxdumptool \
+    hcxtools \
     python3 \
     python3-pip \
     python3-smbus \
+    iw \
     wireless-tools \
     net-tools \
     sqlite3 \
@@ -80,7 +143,8 @@ echo "Installing Python packages..."
 pip3 install --break-system-packages -q \
     flask==3.0.0 \
     flask-cors==4.0.0 \
-    pyserial==3.5
+    pyserial==3.5 \
+    scapy
 
 # --- Create directory structure ---
 echo ""

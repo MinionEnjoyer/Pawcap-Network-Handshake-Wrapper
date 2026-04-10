@@ -7,6 +7,7 @@ let feedEnabled = false;
 let serverUptime = 0; // Server uptime in seconds from API
 let handshakeUpdateCounter = 0;
 let scannerSynced = false; // Prevent toggle desync on page load
+let pendingToggles = {};   // Track in-flight toggle API calls to prevent polling overwrite
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', () => {
@@ -21,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateStatus();
     updateHandshakes();
     updateBlacklist();
+    updateWhitelist();
     startAutoUpdate();
 });
 
@@ -55,6 +57,7 @@ function startAutoUpdate() {
             handshakeUpdateCounter = 0;
             updateHandshakes();
             updateBlacklist();
+            updateWhitelist();
             if (document.getElementById('socialToggle').checked) {
                 updateFriends();
             }
@@ -134,11 +137,21 @@ async function updateStatus() {
             document.getElementById('organicToggle').checked = data.activity.organic_mode;
         }
         
-        // Sync social mode toggle
-        if (data.activity.social_mode !== undefined) {
+        // Sync social mode toggle (skip if toggle API call is in flight)
+        if (data.activity.social_mode !== undefined && !pendingToggles.social) {
             const socialToggle = document.getElementById('socialToggle');
             socialToggle.checked = data.activity.social_mode;
             document.getElementById('socialSection').style.display = data.activity.social_mode ? 'block' : 'none';
+        }
+        
+        // Sync find friends toggle (skip if toggle API call is in flight)
+        if (data.activity.find_friends_mode !== undefined && !pendingToggles.findFriends) {
+            document.getElementById('findFriendsToggle').checked = data.activity.find_friends_mode;
+        }
+        
+        // Sync pack mode toggle (skip if toggle API call is in flight)
+        if (data.activity.pack_mode !== undefined && !pendingToggles.packMode) {
+            document.getElementById('packModeToggle').checked = data.activity.pack_mode;
         }
         
         // Update device name in name panel + settings input
@@ -253,6 +266,17 @@ function updateInterfaceList(interfaces) {
             </div>
         ` : '';
         
+        // Adapter hardware info (chipset, bands)
+        const hw = iface.hw || {};
+        const chipset = hw.chipset && hw.chipset !== 'unknown' ? hw.chipset : '';
+        const bands = (hw.bands || []).join(' + ');
+        const hwLine = chipset || bands ? `
+            <div class="interface-hw">
+                ${chipset ? `<span class="hw-chipset">${chipset}</span>` : ''}
+                ${bands ? `<span class="hw-bands">${bands}</span>` : ''}
+            </div>
+        ` : '';
+        
         return `
             <div class="interface-item">
                 <div class="interface-header">
@@ -260,7 +284,9 @@ function updateInterfaceList(interfaces) {
                     <span class="interface-status-badge ${statusClass}">${iface.status}</span>
                 </div>
                 <div class="interface-details">
+                    <strong>Role:</strong> ${iface.type || 'Scanner'}<br>
                     <strong>Channel:</strong> ${iface.channel} ${getBand(iface.channel) ? '(' + getBand(iface.channel) + ')' : ''}
+                    ${hwLine}
                     ${targetInfo}
                 </div>
             </div>
@@ -434,11 +460,15 @@ async function toggleGPS(enabled) {
 
 async function toggleOrganic(enabled) {
     try {
-        await fetch(`${API_BASE}/api/control/organic`, {
+        const response = await fetch(`${API_BASE}/api/control/organic`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled })
         });
+        if (!response.ok) {
+            console.error('Failed to toggle organic mode:', response.status);
+            document.getElementById('organicToggle').checked = !enabled;
+        }
     } catch (error) {
         console.error('Failed to toggle organic mode:', error);
         document.getElementById('organicToggle').checked = !enabled;
@@ -447,18 +477,28 @@ async function toggleOrganic(enabled) {
 
 async function toggleSocial(enabled) {
     const section = document.getElementById('socialSection');
+    const toggle = document.getElementById('socialToggle');
     section.style.display = enabled ? 'block' : 'none';
+    pendingToggles.social = true;
     try {
-        await fetch(`${API_BASE}/api/control/social`, {
+        const response = await fetch(`${API_BASE}/api/control/social`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled })
         });
-        if (enabled) updateFriends();
+        if (response.ok) {
+            if (enabled) updateFriends();
+        } else {
+            console.error('Failed to toggle social mode:', response.status);
+            toggle.checked = !enabled;
+            section.style.display = enabled ? 'none' : 'block';
+        }
     } catch (error) {
         console.error('Failed to toggle social mode:', error);
-        document.getElementById('socialToggle').checked = !enabled;
-        section.style.display = !enabled ? 'block' : 'none';
+        toggle.checked = !enabled;
+        section.style.display = enabled ? 'none' : 'block';
+    } finally {
+        pendingToggles.social = false;
     }
 }
 
@@ -480,17 +520,20 @@ async function updateFriends() {
             const typeBadge = friend.type === 'pwnagotchi'
                 ? '<span class="social-badge social-badge-pwnagotchi">PWN</span>'
                 : '<span class="social-badge social-badge-pawcap">PAWCAP</span>';
+            const packBadge = friend.in_pack
+                ? '<span class="social-badge social-badge-pack">PACK</span>'
+                : '';
 
             const lastSeen = typeof friend.last_seen === 'number'
                 ? new Date(friend.last_seen * 1000).toLocaleTimeString()
                 : friend.last_seen || '--';
 
             return `
-                <div class="social-item">
+                <div class="social-item${friend.in_pack ? ' pack-member' : ''}">
                     <div class="social-face">${friend.face || ''}</div>
                     <div class="social-info">
                         <div class="social-header">
-                            <strong>${friend.name}</strong> ${typeBadge}
+                            <strong>${friend.name}</strong> ${typeBadge} ${packBadge}
                         </div>
                         <small>Signal: ${friend.signal}dBm | Met ${friend.count}x | v${friend.version} | ${friend.pwnd_tot} captures | Last: ${lastSeen}</small>
                     </div>
@@ -499,6 +542,60 @@ async function updateFriends() {
         }).join('');
     } catch (error) {
         console.error('Failed to update friends:', error);
+    }
+}
+
+// Find Friends toggle
+async function toggleFindFriends(enabled) {
+    const toggle = document.getElementById('findFriendsToggle');
+    pendingToggles.findFriends = true;
+    try {
+        const response = await fetch(`${API_BASE}/api/control/find-friends`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled })
+        });
+        if (!response.ok) {
+            console.error('Failed to toggle find friends:', response.status);
+            toggle.checked = !enabled;
+        }
+    } catch (error) {
+        console.error('Failed to toggle find friends:', error);
+        toggle.checked = !enabled;
+    } finally {
+        pendingToggles.findFriends = false;
+    }
+}
+
+// Pack Mode toggle
+async function togglePackMode(enabled) {
+    const toggle = document.getElementById('packModeToggle');
+    pendingToggles.packMode = true;
+    try {
+        // Auto-enable social if turning on pack mode
+        if (enabled && !document.getElementById('socialToggle').checked) {
+            document.getElementById('socialToggle').checked = true;
+            await toggleSocial(true);
+            // If social failed to enable, abort pack mode
+            if (!document.getElementById('socialToggle').checked) {
+                toggle.checked = false;
+                return;
+            }
+        }
+        const response = await fetch(`${API_BASE}/api/control/pack-mode`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled })
+        });
+        if (!response.ok) {
+            console.error('Failed to toggle pack mode:', response.status);
+            toggle.checked = !enabled;
+        }
+    } catch (error) {
+        console.error('Failed to toggle pack mode:', error);
+        toggle.checked = !enabled;
+    } finally {
+        pendingToggles.packMode = false;
     }
 }
 
@@ -543,6 +640,10 @@ function toggleCharacter(enabled) {
 // Settings toggle
 function toggleSettings(enabled) {
     document.getElementById('settingsSection').style.display = enabled ? 'block' : 'none';
+    // Show/hide Find Friends toggle (only visible in settings mode)
+    const ffRow = document.getElementById('findFriendsRow');
+    if (ffRow) ffRow.style.display = enabled ? 'flex' : 'none';
+    updateWhitelist();
 }
 
 // Theme customization
@@ -861,6 +962,79 @@ async function clearBlacklist() {
         }
     } catch (error) {
         console.error('Failed to clear blacklist:', error);
+    }
+}
+
+// Update whitelist (protected networks)
+async function updateWhitelist() {
+    try {
+        const response = await fetch(`${API_BASE}/api/whitelist`);
+        if (!response.ok) return;
+
+        const ssids = await response.json();
+        const container = document.getElementById('whitelist');
+        if (!container) return;
+
+        const settingsOpen = document.getElementById('settingsToggle')?.checked;
+
+        if (!ssids || ssids.length === 0) {
+            container.innerHTML = settingsOpen
+                ? '<p class="empty-state">No protected networks. Add one below.</p>'
+                : '<p class="empty-state">No protected networks configured.</p>';
+        } else {
+            container.innerHTML = ssids.map(ssid => {
+                const removeBtn = settingsOpen
+                    ? `<span class="whitelist-remove" onclick="removeWhitelist('${ssid.replace(/'/g, "\\'")}')">&times;</span>`
+                    : '';
+                return `<span class="badge">${ssid}${removeBtn}</span>`;
+            }).join('');
+        }
+
+        // Show/hide the add form based on settings toggle
+        const addForm = document.getElementById('whitelistAddForm');
+        if (addForm) addForm.style.display = settingsOpen ? 'flex' : 'none';
+    } catch (error) {
+        console.error('Failed to update whitelist:', error);
+    }
+}
+
+async function addWhitelist() {
+    const input = document.getElementById('whitelistInput');
+    const ssid = (input.value || '').trim();
+    if (!ssid) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/whitelist`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ssid })
+        });
+        if (response.ok) {
+            input.value = '';
+            updateWhitelist();
+        } else {
+            const result = await response.json();
+            alert(result.message || 'Failed to add network.');
+        }
+    } catch (error) {
+        console.error('Failed to add whitelist entry:', error);
+    }
+}
+
+async function removeWhitelist(ssid) {
+    if (!confirm(`Remove "${ssid}" from protected networks?`)) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/whitelist`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ssid })
+        });
+        if (response.ok) {
+            updateWhitelist();
+        }
+    } catch (error) {
+        console.error('Failed to remove whitelist entry:', error);
     }
 }
 

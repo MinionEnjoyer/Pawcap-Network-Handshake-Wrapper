@@ -52,10 +52,10 @@ The authors assume no liability for misuse of this tool.
 
 | Component | Notes |
 |-----------|-------|
-| **Raspberry Pi 4** | 2GB+ RAM recommended |
-| **USB WiFi Adapter** | Must support monitor mode + packet injection. Recommended chipsets: Atheros AR9271, Ralink RT3070, Realtek RTL8812AU |
-| **MicroSD Card** | 16GB+ |
-| **Power Supply** | 5V 3A USB-C, or UPS HAT for portable use |
+| **Raspberry Pi** | Pi 4 (2GB+ RAM) or Pi Zero 2 W (416MB RAM, requires SD boot + USB root) |
+| **USB WiFi Adapter(s)** | Must support monitor mode + packet injection. See [Tested Adapters](#tested-adapters) below |
+| **Storage** | MicroSD (16GB+) or USB drive for root filesystem |
+| **Power Supply** | 5V 3A USB-C, or battery HAT for portable use |
 
 ### Optional
 
@@ -63,7 +63,33 @@ The authors assume no liability for misuse of this tool.
 |-----------|-------|
 | **Second USB WiFi Adapter** | Enables dual-mode: simultaneous scanning + capturing on separate bands |
 | **USB GPS Module** | Serial NMEA GPS (e.g., VK-162, BN-220). Enables location tagging on captures |
-| **Geekworm X728 UPS HAT** | Battery monitoring, portable operation, graceful shutdown |
+| **Battery HAT** | See [Battery Monitoring](#battery-monitoring) for supported options |
+| **USB Hub HAT** | Required for Pi Zero 2 W to connect multiple USB adapters (only 1 USB port) |
+
+### Tested Adapters
+
+Pawcap auto-detects adapter capabilities (chipset, driver, supported bands) at startup via `iw phy` and sysfs. Any adapter with monitor mode and packet injection support should work. These have been verified:
+
+| Adapter | Chipset | Driver | Bands | Tested On |
+|---------|---------|--------|-------|-----------|
+| **Panda PAU0A AC600** | MediaTek MT7610U | mt76x0u | 2.4GHz + 5GHz (dual-band) | RPI0W2_Scrappy |
+| **Alfa AWUS036ACH** | Realtek RTL8812AU | 8812au | 2.4GHz + 5GHz (dual-band) | RPI4_Farfel |
+
+### Tested Platforms
+
+| Device | Board | RAM | Boot | Adapters | Battery | USB Hub |
+|--------|-------|-----|------|----------|---------|---------|
+| **RPI4_Farfel** | Raspberry Pi 4 | 2GB+ | SD or NVMe | 2x Alfa AWUS036ACH | Geekworm X728 UPS HAT | Built-in USB ports |
+| **RPI0W2_Scrappy** | Raspberry Pi Zero 2 W | 416MB | SD boot + USB root | 2x Panda PAU0A AC600 | Waveshare Li-ion Battery HAT (SW6106) | MakerSpot 4-Port Stackable USB Hub HAT |
+
+### Pi Zero 2 W Notes
+
+The Pi Zero 2 W has limited resources and requires extra hardware:
+
+- **Cannot USB boot without an SD card** — Use SD card for `/boot/firmware`, USB drive for root filesystem
+- **Only 1 micro-USB data port** — A stackable USB Hub HAT (e.g., [MakerSpot 4-Port](https://makerspot.com/stackable-usb-hub-for-raspberry-pi-zero/)) is required for multiple USB adapters
+- **416MB RAM** — Optimize with tmpfs mounts for `/tmp` (64MB) and `/var/log` (16MB), volatile journald (16MB), and disabling unnecessary services (ModemManager, bluetooth, avahi-daemon)
+- **Built-in wlan0 is 2.4GHz only** — Used for management/SSH, never for scanning
 
 ### Dual-Mode vs Single-Mode
 
@@ -420,20 +446,29 @@ Any USB serial GPS module that outputs NMEA sentences will work. Recommended: VK
 
 ## Battery Monitoring
 
-### Hardware
+### Supported Hardware
 
-Supports the **Geekworm X728 UPS HAT** via I2C (address 0x36, bus 1).
+| Battery HAT | Chip | I2C Monitoring | Tested On |
+|-------------|------|----------------|-----------|
+| **Geekworm X728 UPS HAT** | MAX17040 | Yes (address 0x36, bus 1) | RPI4_Farfel |
+| **Waveshare Li-ion Battery HAT** | SW6106 | No (LED indicators only) | RPI0W2_Scrappy |
 
-### Features
+### Geekworm X728 (Full Monitoring)
 
-- Real-time voltage and capacity percentage
+- Real-time voltage and capacity percentage via I2C
 - Charging status detection (AC power connected)
-- Health status: Excellent (>80%), Good (50–80%), Fair (20–50%), Low (10–20%), Critical (<10%)
+- Health status: Excellent (>80%), Good (50-80%), Fair (20-50%), Low (10-20%), Critical (<10%)
 - Estimated runtime calculation
 - Low battery alerts at 20% and 10%
 - Displayed in the web UI header stats
 
-If no X728 is detected, battery monitoring is silently disabled.
+### Waveshare Li-ion Battery HAT (Power Only)
+
+The Waveshare SW6106-based HAT provides regulated 5V output and quick charging (PD/QC/FCP) but **does not expose battery data over I2C**. Battery status is only visible via the 5 onboard LED indicators. Pawcap will detect the missing I2C device at startup and silently disable software battery monitoring.
+
+### Auto-Detection
+
+On startup, Pawcap probes I2C address 0x36 with a 3-second timeout. If no device responds, battery monitoring is disabled gracefully. The web UI will show battery as unavailable. This means any Pi can run Pawcap regardless of whether a battery HAT is installed.
 
 ---
 

@@ -37,6 +37,23 @@ class WebServer:
         # Register routes
         self._register_routes()
     
+    def _safe_battery_read(self):
+        """Read battery status with a timeout to prevent I2C hangs"""
+        if not self.battery_monitor:
+            return {'available': False}
+        try:
+            result = [None]
+            def _read():
+                result[0] = self.battery_monitor.get_status()
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
+            t.join(timeout=2)
+            if result[0] is not None:
+                return result[0]
+        except:
+            pass
+        return {'available': False}
+
     def _get_capture_count(self):
         """Thread-safe method to get current capture count"""
         if not self.scanner:
@@ -95,10 +112,8 @@ class WebServer:
             # Calculate uptime in seconds
             uptime_seconds = int(time.time() - self.start_time)
             
-            # Get battery status
-            battery = {'available': False}
-            if self.battery_monitor:
-                battery = self.battery_monitor.get_status()
+            # Get battery status (with timeout to prevent I2C hangs)
+            battery = self._safe_battery_read()
             
             # Get CPU temperature
             cpu_temp = None
@@ -169,7 +184,10 @@ class WebServer:
                     'scan_phase': stats.get('scan_phase', ''),
                     'dual_mode': self.scanner.dual_mode if self.scanner else False,
                     'organic_mode': self.scanner.organic_mode if self.scanner and hasattr(self.scanner, 'organic_mode') else False,
-                    'social_mode': self.scanner.social_mode if self.scanner and hasattr(self.scanner, 'social_mode') else False
+                    'social_mode': self.scanner.social_mode if self.scanner and hasattr(self.scanner, 'social_mode') else False,
+                    'find_friends_mode': self.scanner.find_friends_mode if self.scanner and hasattr(self.scanner, 'find_friends_mode') else False,
+                    'pack_mode': self.scanner.pack_mode if self.scanner and hasattr(self.scanner, 'pack_mode') else False,
+                    'pack_peers': len(self.scanner._pack_peers) if self.scanner and hasattr(self.scanner, '_pack_peers') else 0
                 },
                 'device_name': self.config.get('device', {}).get('name', 'Pawcap'),
                 'mood': self.scanner.get_mood() if self.scanner and hasattr(self.scanner, 'get_mood') else {'state': 'sleeping', 'face': 'U´-ᴥ-`U', 'message': 'Offline'},
@@ -276,7 +294,34 @@ class WebServer:
                 enabled = data.get('enabled', False)
                 if self.scanner:
                     self.scanner.social_mode = enabled
-                return jsonify({'status': 'success', 'message': f'Social mode {"enabled" if enabled else "disabled"}'}), 200
+                actual = self.scanner.social_mode if self.scanner else enabled
+                return jsonify({'status': 'success', 'enabled': actual}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        @self.app.route('/api/control/find-friends', methods=['POST'])
+        def toggle_find_friends():
+            """Toggle find friends mode on/off"""
+            try:
+                data = request.get_json()
+                enabled = data.get('enabled', False)
+                if self.scanner:
+                    self.scanner.find_friends_mode = enabled
+                actual = self.scanner.find_friends_mode if self.scanner else enabled
+                return jsonify({'status': 'success', 'enabled': actual}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        @self.app.route('/api/control/pack-mode', methods=['POST'])
+        def toggle_pack_mode():
+            """Toggle pack mode on/off"""
+            try:
+                data = request.get_json()
+                enabled = data.get('enabled', False)
+                if self.scanner:
+                    self.scanner.pack_mode = enabled
+                actual = self.scanner.pack_mode if self.scanner else enabled
+                return jsonify({'status': 'success', 'enabled': actual}), 200
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -285,10 +330,13 @@ class WebServer:
             """Get social encounters (friends list)"""
             if self.scanner and hasattr(self.scanner, 'social_encounters'):
                 friends = []
+                pack_peers = dict(self.scanner._pack_peers) if hasattr(self.scanner, '_pack_peers') else {}
                 for peer_id, data in self._get_social_encounters_snapshot():
+                    name = data['name']
+                    in_pack = name in pack_peers and self.scanner._pack_mode
                     friends.append({
                         'peer_id': peer_id,
-                        'name': data['name'],
+                        'name': name,
                         'type': data['type'],
                         'face': data['face'],
                         'signal': data['signal'],
@@ -297,6 +345,7 @@ class WebServer:
                         'last_seen': data['last_seen'],
                         'version': data.get('version', '?'),
                         'pwnd_tot': data.get('pwnd_tot', 0),
+                        'in_pack': in_pack,
                     })
                 friends.sort(key=lambda f: f.get('last_seen', 0) if isinstance(f.get('last_seen', 0), (int, float)) else 0, reverse=True)
                 return jsonify(friends)
@@ -376,13 +425,170 @@ class WebServer:
             except Exception as e:
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
+        @self.app.route('/api/whitelist')
+        def get_whitelist():
+            """Get protected network SSIDs"""
+            if self.scanner and hasattr(self.scanner, 'whitelist'):
+                return jsonify(sorted(self.scanner.whitelist))
+            return jsonify([])
+
+        @self.app.route('/api/whitelist', methods=['POST'])
+        def add_whitelist():
+            """Add an SSID to the whitelist"""
+            try:
+                data = request.get_json()
+                ssid = (data.get('ssid') or '').strip()
+                if not ssid:
+                    return jsonify({'status': 'error', 'message': 'SSID cannot be empty'}), 400
+
+                whitelist_file = self.config.get('whitelist', {}).get('file', '/opt/pawcap/config/whitelist.conf')
+
+                # Add to scanner's in-memory set
+                if self.scanner and hasattr(self.scanner, 'whitelist'):
+                    self.scanner.whitelist.add(ssid)
+
+                # Persist to file (read existing, append if not present)
+                import os
+                existing = set()
+                if os.path.exists(whitelist_file):
+                    with open(whitelist_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#'):
+                                existing.add(line)
+                if ssid not in existing:
+                    with open(whitelist_file, 'a') as f:
+                        f.write(ssid + '\n')
+
+                return jsonify({'status': 'success', 'ssid': ssid}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        @self.app.route('/api/whitelist', methods=['DELETE'])
+        def remove_whitelist():
+            """Remove an SSID from the whitelist"""
+            try:
+                data = request.get_json()
+                ssid = (data.get('ssid') or '').strip()
+                if not ssid:
+                    return jsonify({'status': 'error', 'message': 'SSID cannot be empty'}), 400
+
+                whitelist_file = self.config.get('whitelist', {}).get('file', '/opt/pawcap/config/whitelist.conf')
+
+                # Remove from scanner's in-memory set
+                if self.scanner and hasattr(self.scanner, 'whitelist'):
+                    self.scanner.whitelist.discard(ssid)
+
+                # Rewrite file without the removed SSID
+                import os
+                if os.path.exists(whitelist_file):
+                    with open(whitelist_file, 'r') as f:
+                        lines = f.readlines()
+                    with open(whitelist_file, 'w') as f:
+                        for line in lines:
+                            stripped = line.strip()
+                            if stripped.startswith('#') or stripped != ssid:
+                                f.write(line)
+
+                return jsonify({'status': 'success', 'ssid': ssid}), 200
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+
         @self.app.route('/api/activity')
         def get_activity():
             """Get activity feed entries"""
             if self.scanner and hasattr(self.scanner, 'get_activity_feed'):
                 return jsonify(self.scanner.get_activity_feed())
             return jsonify([])
-    
+
+        # --- Pack tunnel API endpoints ---
+
+        @self.app.route('/api/pack/sync', methods=['POST'])
+        def pack_sync():
+            """Bidirectional pack state exchange. Peer POSTs its state, receives ours."""
+            if not self.scanner or not getattr(self.scanner, '_pack_mode', False):
+                return jsonify({'error': 'Pack mode not active'}), 403
+            try:
+                data = request.get_json()
+                peer_name = data.get('device_name', 'Unknown')
+                # Update peer data from the incoming sync
+                if hasattr(self.scanner, '_pack_peers') and peer_name in self.scanner._pack_peers:
+                    self.scanner._pack_peers[peer_name]['scan_state'] = data.get('scan_state', {})
+                    self.scanner._pack_peers[peer_name]['handshake_bssids'] = data.get('handshake_bssids', [])
+                    self.scanner._pack_peers[peer_name]['deauth_claims'] = data.get('deauth_claims', {})
+                    self.scanner._pack_peers[peer_name]['http_reachable'] = True
+                    self.scanner._pack_peers[peer_name]['last_seen'] = time.time()
+                # Return our state
+                our_state = {
+                    'device_name': self.config.get('device', {}).get('name', 'Pawcap'),
+                    'scan_state': self.scanner._get_pack_scan_state() if hasattr(self.scanner, '_get_pack_scan_state') else {},
+                    'handshake_bssids': self.scanner._get_handshake_bssids() if hasattr(self.scanner, '_get_handshake_bssids') else [],
+                    'deauth_claims': self.scanner._get_deauth_claims() if hasattr(self.scanner, '_get_deauth_claims') else {}
+                }
+                return jsonify(our_state), 200
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/pack/handshake', methods=['POST'])
+        def pack_receive_handshake():
+            """Receive a handshake capture file from a pack peer."""
+            if not self.scanner or not getattr(self.scanner, '_pack_mode', False):
+                return jsonify({'error': 'Pack mode not active'}), 403
+            try:
+                import os, json as json_mod
+                # Parse multipart: metadata field + capture file
+                metadata_raw = request.form.get('metadata')
+                if not metadata_raw:
+                    return jsonify({'error': 'Missing metadata'}), 400
+                metadata = json_mod.loads(metadata_raw)
+                bssid = metadata.get('bssid')
+                ssid = metadata.get('ssid', 'Unknown')
+                channel = metadata.get('channel')
+                if not bssid:
+                    return jsonify({'error': 'Missing BSSID'}), 400
+
+                # Skip if we already have this handshake
+                if self.db and self.db.has_handshake(bssid):
+                    return jsonify({'status': 'duplicate', 'message': f'Already have handshake for {bssid}'}), 200
+
+                capture = request.files.get('capture')
+                if not capture:
+                    return jsonify({'error': 'Missing capture file'}), 400
+
+                # Save to handshake_dir with PACK_ prefix
+                handshake_dir = self.config.get('capture', {}).get('handshake_dir', '/opt/pawcap/captures/handshakes')
+                os.makedirs(handshake_dir, exist_ok=True)
+                safe_ssid = "".join(c for c in ssid if c.isalnum() or c in ('-', '_'))
+                safe_bssid = bssid.replace(':', '')
+                from datetime import datetime
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                dest_file = os.path.join(handshake_dir, f'PACK_{safe_ssid}_{safe_bssid}_{timestamp}.cap')
+                capture.save(dest_file)
+
+                # Register in database
+                if self.db:
+                    self.db.add_handshake(bssid, ssid, dest_file, channel=channel)
+                    if self.scanner:
+                        self.scanner.stats['handshakes'] = self.scanner.stats.get('handshakes', 0) + 1
+                        self.scanner._log_activity('SUCCESS', f'Pack: received handshake for {ssid} ({bssid}) from peer')
+
+                return jsonify({'status': 'saved', 'file': os.path.basename(dest_file)}), 200
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/pack/handshakes')
+        def pack_list_handshakes():
+            """Return list of BSSIDs we have handshakes for (lightweight, for diffing)."""
+            if not self.scanner or not getattr(self.scanner, '_pack_mode', False):
+                return jsonify({'error': 'Pack mode not active'}), 403
+            bssids = []
+            if self.db:
+                try:
+                    bssids = [h['bssid'] for h in self.db.get_all_handshakes()]
+                except:
+                    pass
+            return jsonify({'bssids': bssids}), 200
+
     def start(self):
         """Start the web server"""
         if self.running:
