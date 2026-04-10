@@ -501,6 +501,22 @@ class WebServer:
                 return jsonify(self.scanner.get_activity_feed())
             return jsonify([])
 
+        @self.app.route('/api/debug/threads')
+        def debug_threads():
+            """Dump Python thread info for debugging leaks."""
+            import threading, sys, traceback, io
+            threads = []
+            frames = sys._current_frames()
+            for t in threading.enumerate():
+                info = {'name': t.name, 'daemon': t.daemon, 'alive': t.is_alive()}
+                frame = frames.get(t.ident)
+                if frame:
+                    buf = io.StringIO()
+                    traceback.print_stack(frame, limit=6, file=buf)
+                    info['stack'] = buf.getvalue()
+                threads.append(info)
+            return jsonify({'count': threading.active_count(), 'threads': threads})
+
         # --- Pack tunnel API endpoints ---
 
         @self.app.route('/api/pack/sync', methods=['POST'])
