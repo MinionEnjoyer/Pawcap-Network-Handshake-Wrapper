@@ -25,6 +25,10 @@ Autonomous WiFi handshake capture tool for Raspberry Pi. Scans nearby networks, 
 - USB WiFi adapter with monitor mode and packet injection support
 - Raspberry Pi OS Lite (64-bit)
 
+## Support
+
+- If you found this project useful, consider supporting me here: https://buymeacoffee.com/minionenjoyer Thank you!
+
 ## Setup
 
 See [DOCUMENTATION.md](DOCUMENTATION.md) for full installation instructions, configuration reference, API endpoints, and troubleshooting.
