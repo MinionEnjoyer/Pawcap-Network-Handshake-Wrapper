@@ -615,18 +615,22 @@ class WebServer:
     def stop(self):
         """Stop the web server"""
         self.running = False
-        # Note: Flask doesn't have a clean shutdown in threaded mode
-        # The daemon thread will terminate when the main program exits
     
     def _run_server(self, port):
-        """Run the Flask server"""
+        """Run the Flask server in single-threaded mode.
+        
+        threaded=True leaks OS threads on the Pi Zero (416MB RAM, 587
+        thread ulimit) because Werkzeug never joins finished request
+        threads.  Single-threaded mode prevents this.  Pack sync timeouts
+        are handled by increasing the comms worker's HTTP timeout.
+        """
         try:
             self.app.run(
                 host='0.0.0.0',
                 port=port,
                 debug=False,
                 use_reloader=False,
-                threaded=True
+                threaded=False
             )
         except Exception as e:
             print(f"Web server error: {e}")

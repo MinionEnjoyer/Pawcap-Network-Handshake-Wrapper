@@ -1894,7 +1894,7 @@ class WiFiScanner:
                             headers={'Content-Type': 'application/json'},
                             method='POST'
                         )
-                        with urllib.request.urlopen(req, timeout=5) as resp:
+                        with urllib.request.urlopen(req, timeout=10) as resp:
                             resp_data = json.loads(resp.read().decode())
                         # Update peer with HTTP-synced data
                         if peer_name in self._pack_peers:
@@ -1929,8 +1929,8 @@ class WiFiScanner:
             except Exception as e:
                 self._log_activity('WARN', f'Pack comms worker error: {e}')
 
-            # Sleep 10s in 1s increments for responsiveness
-            for _ in range(10):
+            # Sleep 30s in 1s increments for responsiveness
+            for _ in range(30):
                 if not self._pack_mode or not self.running:
                     break
                 time.sleep(1)
