@@ -27,7 +27,7 @@ Autonomous WiFi handshake capture tool for Raspberry Pi. Scans nearby networks, 
 
 ## Support
 
-- If you found this project useful, consider supporting me here: https://buymeacoffee.com/minionenjoyer Thank you!
+If you found this project useful, consider supporting me here: https://buymeacoffee.com/minionenjoyer Thank you!
 
 ## Setup
 
